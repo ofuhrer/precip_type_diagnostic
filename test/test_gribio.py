@@ -67,7 +67,7 @@ def _write_template_grib(path: Path) -> object:
                 "date": 20260423,
                 "time": 0,
                 "step": 1,
-                "paramId": 130,
+                "shortName": "T_G",
                 "typeOfFirstFixedSurface": 1,
                 "scaledValueOfFirstFixedSurface": 0,
                 "scaleFactorOfFirstFixedSurface": 0,
@@ -415,9 +415,37 @@ def test_categorical_fast_path_skips_dry_columns(monkeypatch: pytest.MonkeyPatch
     assert call_count["value"] == 2
 
 
-def test_output_grib_metadata_is_stable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    local_defs = Path("src/precip_type_diag/definitions").resolve()
-    monkeypatch.setattr("precip_type_diag.gribio._candidate_meteoswiss_definition_dirs", lambda: [local_defs])
+def test_categorical_fast_path_treats_negative_hourly_precipitation_as_dry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from precip_type_diag.grid import GridInputs, diagnose_grid_categorical
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("negative precipitation columns should not reach the numba kernel")
+
+    monkeypatch.setattr("precip_type_diag.grid.diagnose_grid_categorical_numba_kernel", fail_if_called)
+
+    categorical = diagnose_grid_categorical(
+        GridInputs(
+            temperature_k=np.ones((2, 3)) * 270.0,
+            pressure_pa=np.ones((2, 3)) * 80000.0,
+            specific_humidity=np.ones((2, 3)) * 0.002,
+            half_level_height_m=np.array(
+                [
+                    [3000.0, 3000.0, 3000.0],
+                    [1500.0, 1500.0, 1500.0],
+                    [0.0, 0.0, 0.0],
+                ]
+            ),
+            total_precip_mm=np.array([-0.2, -1.0, 0.0]),
+            ground_temperature_c=np.array([-1.0, -1.0, -1.0]),
+        )
+    )
+
+    np.testing.assert_array_equal(categorical, np.array([0, 0, 0], dtype=np.int32))
+
+
+def test_output_grib_metadata_is_stable(tmp_path: Path) -> None:
     bootstrap_eccodes_definitions()
 
     template_path = tmp_path / "template.grib2"
@@ -584,13 +612,11 @@ def test_output_grib_metadata_is_stable_with_fast_template(monkeypatch: pytest.M
     assert output_field.metadata("step") == 114
 
 
-def test_real_icon_ch1_eps_fixture_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_real_icon_ch1_eps_fixture_smoke() -> None:
     required = ["lfff00010000", "lfff00000000c"]
     if any(not (REAL_FIXTURE_DIR_CH1 / name).exists() for name in required):
         pytest.skip("Real CH1-EPS fixture pair is not fully present")
 
-    local_defs = Path("src/precip_type_diag/definitions").resolve()
-    monkeypatch.setattr("precip_type_diag.gribio._candidate_meteoswiss_definition_dirs", lambda: [local_defs])
     bootstrap_eccodes_definitions()
 
     selected = from_source("file", str(REAL_FIXTURE_DIR_CH1 / "lfff00010000")).sel(paramId=500041)

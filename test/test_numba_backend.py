@@ -11,7 +11,6 @@ import pytest
 
 pytest.importorskip("numba")
 
-from precip_type_diag.grid import diagnose_grid_categorical
 from precip_type_diag.numba_backend import diagnose_column_categorical_numba
 from precip_type_diag.profile import ThermodynamicColumn, diagnose_column_from_thermodynamics
 

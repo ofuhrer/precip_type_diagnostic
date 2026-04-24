@@ -114,7 +114,6 @@ def test_process_member_run_reuses_previous_tot_prec_from_prior_step(monkeypatch
     _touch(member_dir / "lfff00000000c")
     _touch(member_dir / "lfff00010000")
     _touch(member_dir / "lfff00020000")
-    fake_sources = _fake_sources(member_dir)
     writes: list[tuple[Path, np.ndarray]] = []
 
     monkeypatch.setattr("precip_type_diag.operational.bootstrap_eccodes_definitions", lambda: "")
@@ -161,12 +160,97 @@ def test_process_member_run_reuses_previous_tot_prec_from_prior_step(monkeypatch
     assert selection_calls == [9000.0]
 
 
+def test_process_member_run_records_hhl_setup_failure(monkeypatch, tmp_path: Path) -> None:
+    member_dir = tmp_path / "icon" / "000"
+    _touch(member_dir / "lfff00000000c")
+
+    monkeypatch.setattr("precip_type_diag.operational.bootstrap_eccodes_definitions", lambda: "")
+
+    def broken_scan(path: Path, required_fields, *, level_start_by_name=None, capture_template_for=None):
+        raise RuntimeError("cannot read HHL")
+
+    monkeypatch.setattr("precip_type_diag.operational._scan_grib_file_fast", broken_scan)
+
+    summary = process_member_run(
+        member_dir=member_dir,
+        member="000",
+        output_dir=tmp_path / "out",
+        precip_mask_threshold_mm=0.0,
+        overwrite=False,
+    )
+
+    assert summary["member"] == "000"
+    assert summary["written"] == []
+    assert summary["skipped"] == []
+    assert summary["failed"] == [{"member": "000", "reason": "RuntimeError: cannot read HHL"}]
+    assert isinstance(summary["runtime_s"], float)
+
+
+def test_process_member_run_records_vertical_selection_failure(monkeypatch, tmp_path: Path) -> None:
+    member_dir = tmp_path / "icon" / "000"
+    _touch(member_dir / "lfff00000000c")
+
+    monkeypatch.setattr("precip_type_diag.operational.bootstrap_eccodes_definitions", lambda: "")
+    monkeypatch.setattr("precip_type_diag.operational._scan_grib_file_fast", _fake_scan_factory(member_dir))
+
+    def broken_selection(full_half_level_height_m, vertical_cutoff_m):
+        raise ValueError("bad cutoff")
+
+    monkeypatch.setattr("precip_type_diag.operational.derive_vertical_level_selection", broken_selection)
+
+    summary = process_member_run(
+        member_dir=member_dir,
+        member="000",
+        output_dir=tmp_path / "out",
+        precip_mask_threshold_mm=0.0,
+        overwrite=False,
+    )
+
+    assert summary["written"] == []
+    assert summary["skipped"] == []
+    assert summary["failed"] == [{"member": "000", "reason": "ValueError: bad cutoff"}]
+    assert isinstance(summary["runtime_s"], float)
+
+
+def test_process_member_run_records_step_scan_failure(monkeypatch, tmp_path: Path) -> None:
+    member_dir = tmp_path / "icon" / "000"
+    _touch(member_dir / "lfff00000000c")
+    _touch(member_dir / "lfff00000000")
+
+    fake_scan = _fake_scan_factory(member_dir)
+
+    def scan_with_step_failure(path: Path, required_fields, *, level_start_by_name=None, capture_template_for=None):
+        if path.name == "lfff00000000":
+            raise RuntimeError("cannot read forecast")
+        return fake_scan(
+            path,
+            required_fields,
+            level_start_by_name=level_start_by_name,
+            capture_template_for=capture_template_for,
+        )
+
+    monkeypatch.setattr("precip_type_diag.operational.bootstrap_eccodes_definitions", lambda: "")
+    monkeypatch.setattr("precip_type_diag.operational._scan_grib_file_fast", scan_with_step_failure)
+
+    summary = process_member_run(
+        member_dir=member_dir,
+        member="000",
+        output_dir=tmp_path / "out",
+        precip_mask_threshold_mm=0.0,
+        overwrite=False,
+    )
+
+    assert summary["written"] == []
+    assert summary["skipped"] == []
+    assert summary["failed"] == [{"step": "00000000", "reason": "RuntimeError: cannot read forecast"}]
+    assert isinstance(summary["runtime_s"], float)
+
+
 def test_process_member_run_skips_existing_valid_outputs(monkeypatch, tmp_path: Path) -> None:
     member_dir = tmp_path / "icon" / "000"
     _touch(member_dir / "lfff00000000c")
     _touch(member_dir / "lfff00000000")
     _touch(member_dir / "lfff00010000")
-    fake_sources = _fake_sources(member_dir)
     output_dir = tmp_path / "out"
     existing = output_dir / "000" / "lfff00010000.ptype.grib2"
     _touch(existing)
@@ -239,3 +323,8 @@ def test_run_operational_writes_summary_for_latest_run(monkeypatch, tmp_path: Pa
 def test_config_for_model_rejects_invalid_precip_threshold() -> None:
     with pytest.raises(ValueError, match="non-negative"):
         config_for_model("ICON-CH1-EPS", precip_mask_threshold_mm=-0.1)
+
+
+def test_config_for_model_rejects_unknown_model() -> None:
+    with pytest.raises(ValueError, match="Unsupported model"):
+        config_for_model("ICON-CH3-EPS")

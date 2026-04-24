@@ -35,7 +35,7 @@ def _write_template_grib(path: Path) -> object:
                 "date": 20260423,
                 "time": 0,
                 "step": 1,
-                "paramId": 130,
+                "shortName": "T_G",
                 "typeOfFirstFixedSurface": 1,
                 "scaledValueOfFirstFixedSurface": 0,
                 "scaleFactorOfFirstFixedSurface": 0,
@@ -45,9 +45,7 @@ def _write_template_grib(path: Path) -> object:
     return from_source("file", str(path))[0]
 
 
-def test_run_prototype_regression_manifest(tmp_path: Path, monkeypatch) -> None:
-    local_defs = Path("src/precip_type_diag/definitions").resolve()
-    monkeypatch.setattr("precip_type_diag.gribio._candidate_meteoswiss_definition_dirs", lambda: [local_defs])
+def test_run_prototype_regression_manifest(tmp_path: Path) -> None:
     bootstrap_eccodes_definitions()
 
     template = _write_template_grib(tmp_path / "template.grib2")

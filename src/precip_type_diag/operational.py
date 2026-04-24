@@ -17,7 +17,6 @@ from .constants import DEFAULT_VERTICAL_CUTOFF_M, PRECIPITATION_TYPE_NAMES, Prec
 from .gribio import (
     _scan_grib_file_fast,
     _previous_step,
-    available_members,
     available_steps,
     bootstrap_eccodes_definitions,
     derive_vertical_level_selection,
@@ -71,6 +70,9 @@ def config_for_model(
     output_root: Path | None = None,
     precip_mask_threshold_mm: float | None = None,
 ) -> OperationalConfig:
+    if model not in MODEL_CONFIGS:
+        supported = ", ".join(sorted(MODEL_CONFIGS))
+        raise ValueError(f"Unsupported model {model!r}; expected one of: {supported}")
     base = MODEL_CONFIGS[model]
     threshold = (
         validate_precip_mask_threshold_mm(precip_mask_threshold_mm)
@@ -189,6 +191,13 @@ def _member_summary_template(member: str) -> dict[str, object]:
     }
 
 
+def _failed_member_summary(member: str, reason: str, runtime_s: float) -> dict[str, object]:
+    summary = _member_summary_template(member)
+    summary["failed"].append({"member": member, "reason": reason})
+    summary["runtime_s"] = round(runtime_s, 3)
+    return summary
+
+
 def process_member_run(
     *,
     member_dir: Path,
@@ -199,66 +208,67 @@ def process_member_run(
     overwrite: bool,
 ) -> dict[str, object]:
     start = time.perf_counter()
-    bootstrap_eccodes_definitions()
     threshold = validate_precip_mask_threshold_mm(precip_mask_threshold_mm)
 
     summary = _member_summary_template(member)
     constants_file = member_dir / "lfff00000000c"
     if not constants_file.exists():
-        summary["failed"].append({"member": member, "reason": "missing constants file"})
-        summary["runtime_s"] = round(time.perf_counter() - start, 3)
-        return summary
+        return _failed_member_summary(member, "missing constants file", time.perf_counter() - start)
 
-    constants_fields, _ = _scan_grib_file_fast(constants_file, ("HHL",))
-    full_half_level_height_m = constants_fields["HHL"]
-    selection = derive_vertical_level_selection(full_half_level_height_m, vertical_cutoff_m)
-    half_level_height_m = full_half_level_height_m[selection.half_level_start :]
+    try:
+        bootstrap_eccodes_definitions()
+        constants_fields, _ = _scan_grib_file_fast(constants_file, ("HHL",))
+        full_half_level_height_m = constants_fields["HHL"]
+        selection = derive_vertical_level_selection(full_half_level_height_m, vertical_cutoff_m)
+        half_level_height_m = full_half_level_height_m[selection.half_level_start :]
+    except Exception as exc:
+        return _failed_member_summary(member, f"{type(exc).__name__}: {exc}", time.perf_counter() - start)
 
     steps = available_steps(member_dir)
     previous_step: str | None = None
     previous_total_precip: np.ndarray | None = None
 
     for step in steps:
-        current_file = member_dir / f"lfff{step}"
-        current_fields, template_field = _scan_grib_file_fast(
-            current_file,
-            ("T", "P", "QV", "TOT_PREC", "T_G"),
-            level_start_by_name={
-                "T": selection.full_level_start,
-                "P": selection.full_level_start,
-                "QV": selection.full_level_start,
-            },
-            capture_template_for="TOT_PREC",
-        )
-        total_precip_current = current_fields["TOT_PREC"]
-
-        expected_previous = _previous_step(step)
-        processable = expected_previous is None
-        total_precip_mm = total_precip_current
-        if expected_previous is not None:
-            processable = previous_step == expected_previous and previous_total_precip is not None
-            if processable:
-                total_precip_mm = total_precip_current - previous_total_precip
-
-        if not processable:
-            summary["skipped"].append(
-                {
-                    "step": step,
-                    "reason": "missing previous forecast file",
-                }
-            )
-            previous_step = step
-            previous_total_precip = total_precip_current
-            continue
-
-        destination = operational_output_path(output_dir, member, step)
-        if not overwrite and _is_valid_output(destination):
-            summary["skipped"].append({"step": step, "reason": "existing valid output"})
-            previous_step = step
-            previous_total_precip = total_precip_current
-            continue
-
         try:
+            current_file = member_dir / f"lfff{step}"
+            current_fields, template_field = _scan_grib_file_fast(
+                current_file,
+                ("T", "P", "QV", "TOT_PREC", "T_G"),
+                level_start_by_name={
+                    "T": selection.full_level_start,
+                    "P": selection.full_level_start,
+                    "QV": selection.full_level_start,
+                },
+                capture_template_for="TOT_PREC",
+            )
+            total_precip_current = current_fields["TOT_PREC"]
+
+            expected_previous = _previous_step(step)
+            processable = expected_previous is None
+            total_precip_mm = total_precip_current
+            if expected_previous is not None:
+                processable = previous_step == expected_previous and previous_total_precip is not None
+                if processable:
+                    total_precip_mm = total_precip_current - previous_total_precip
+
+            if not processable:
+                summary["skipped"].append(
+                    {
+                        "step": step,
+                        "reason": "missing previous forecast file",
+                    }
+                )
+                previous_step = step
+                previous_total_precip = total_precip_current
+                continue
+
+            destination = operational_output_path(output_dir, member, step)
+            if not overwrite and _is_valid_output(destination):
+                summary["skipped"].append({"step": step, "reason": "existing valid output"})
+                previous_step = step
+                previous_total_precip = total_precip_current
+                continue
+
             categorical = diagnose_grid_categorical(
                 GridInputs(
                     temperature_k=current_fields["T"],
@@ -276,6 +286,7 @@ def process_member_run(
             summary["category_counts"] = _merge_category_counts([summary["category_counts"], counts])
         except Exception as exc:
             summary["failed"].append({"step": step, "reason": f"{type(exc).__name__}: {exc}"})
+            continue
 
         previous_step = step
         previous_total_precip = total_precip_current
@@ -367,7 +378,7 @@ def run_operational(
     total_runtime_s = round(time.perf_counter() - start, 3)
     ordered_results = {member: member_results[member] for member in members}
     summary = {
-        "model": model,
+        "model": config.model,
         "run": run_id,
         "input_run": str(input_run),
         "output_dir": str(output_dir),

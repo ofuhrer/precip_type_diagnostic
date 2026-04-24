@@ -235,11 +235,6 @@ def build_jobs(input_run: Path, members: list[str] | str, hours: list[str] | str
     return jobs, skipped
 
 
-def _select_fields(path: Path, short_name: str):
-    fieldset = from_source("file", str(path))
-    return _select_fields_from_fieldset(fieldset, path, short_name)
-
-
 def _select_fields_from_fieldset(fieldset, path: Path, short_name: str):
     selected = fieldset.sel(paramId=INPUT_PARAM_IDS[short_name])
     if len(selected) == 0:
@@ -247,19 +242,9 @@ def _select_fields_from_fieldset(fieldset, path: Path, short_name: str):
     return selected
 
 
-def _stack_3d(path: Path, short_name: str) -> np.ndarray:
-    selected = _select_fields(path, short_name)
-    return np.stack([field.to_numpy(flatten=False) for field in selected], axis=0)
-
-
 def _stack_3d_from_fieldset(fieldset, path: Path, short_name: str) -> np.ndarray:
     selected = _select_fields_from_fieldset(fieldset, path, short_name)
     return np.stack([field.to_numpy(flatten=False) for field in selected], axis=0)
-
-
-def _read_2d(path: Path, short_name: str):
-    selected = _select_fields(path, short_name)
-    return _read_2d_from_selected(selected, path, short_name)
 
 
 def _read_2d_from_fieldset(fieldset, path: Path, short_name: str):
