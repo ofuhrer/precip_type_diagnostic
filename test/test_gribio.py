@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import time
 
 import numpy as np
 import pytest
@@ -13,6 +15,7 @@ from precip_type_diag.gribio import (
     MemberHourJob,
     MissingFieldError,
     MissingFileError,
+    _prune_grib_index_cache,
     _scan_grib_file_sequential,
     _previous_step,
     bootstrap_eccodes_definitions,
@@ -125,6 +128,26 @@ def test_bootstrap_eccodes_definitions_is_idempotent(monkeypatch: pytest.MonkeyP
 
     assert combined == "/defs/local:/defs/ms:/eccodes/base"
     assert calls == ["/defs/local:/defs/ms:/eccodes/base"]
+
+
+def test_grib_index_cache_prunes_files_older_than_max_age(tmp_path: Path) -> None:
+    old_index = tmp_path / "old.idx"
+    fresh_index = tmp_path / "fresh.idx"
+    unrelated = tmp_path / "old.tmp"
+    old_index.write_bytes(b"old")
+    fresh_index.write_bytes(b"fresh")
+    unrelated.write_bytes(b"tmp")
+
+    now = time.time()
+    old_time = now - 11 * 24 * 60 * 60
+    os.utime(old_index, (old_time, old_time))
+    os.utime(unrelated, (old_time, old_time))
+
+    _prune_grib_index_cache(tmp_path, max_age_days=10)
+
+    assert not old_index.exists()
+    assert fresh_index.exists()
+    assert unrelated.exists()
 
 
 def test_fast_scan_skips_discarded_3d_levels_before_decoding_values(

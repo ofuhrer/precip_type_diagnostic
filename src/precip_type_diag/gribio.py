@@ -9,6 +9,7 @@ import os
 import re
 from datetime import timedelta
 import tempfile
+import time
 from typing import Iterable
 
 import eccodes
@@ -30,6 +31,7 @@ THREE_D_FIELDS = frozenset({"T", "P", "QV", "HHL"})
 GRIB_INDEX_CACHE_ENV = "PRECIP_TYPE_DIAG_GRIB_INDEX_CACHE"
 GRIB_INDEX_CACHE_DISABLED = frozenset({"0", "false", "no", "off", "none", ""})
 GRIB_INDEX_CACHE_VERSION = "v2"
+GRIB_INDEX_MAX_AGE_DAYS = 10
 
 
 class MissingFieldError(RuntimeError):
@@ -102,6 +104,20 @@ def _grib_index_cache_path(path: Path) -> Path | None:
     return cache_dir / f"{digest}.idx"
 
 
+def _prune_grib_index_cache(cache_dir: Path, *, max_age_days: int = GRIB_INDEX_MAX_AGE_DAYS) -> None:
+    cutoff = time.time() - max_age_days * 24 * 60 * 60
+    try:
+        candidates = list(cache_dir.glob("*.idx"))
+    except OSError:
+        return
+    for candidate in candidates:
+        try:
+            if candidate.stat().st_mtime < cutoff:
+                candidate.unlink()
+        except OSError:
+            continue
+
+
 def _open_param_id_index(path: Path):
     source = Path(path).resolve()
     cache_path = _grib_index_cache_path(path)
@@ -109,6 +125,7 @@ def _open_param_id_index(path: Path):
         return eccodes.codes_index_new_from_file(str(source), ["paramId:l"])
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
+    _prune_grib_index_cache(cache_path.parent)
     if cache_path.exists():
         return eccodes.codes_index_read(str(cache_path))
 

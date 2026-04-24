@@ -112,7 +112,8 @@ An extra copy of the same summary can be written with `--summary-json`.
 GRIB reads use small ecCodes index files cached under the system temporary
 directory. Set `PRECIP_TYPE_DIAG_GRIB_INDEX_CACHE=/path/to/cache` to choose a
 different location, or `PRECIP_TYPE_DIAG_GRIB_INDEX_CACHE=off` to disable
-persisted index caching.
+persisted index caching. Cached index files older than 10 days are pruned
+best-effort when the cache is used.
 
 ## Validation
 
