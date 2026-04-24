@@ -7,12 +7,13 @@ import pytest
 from earthkit.data import from_source
 from earthkit.data.encoders.grib import GribEncoder
 
-from precip_type_diag.constants import OUTPUT_PARAM_ID, OUTPUT_SHORT_NAME, REQUIRED_INPUT_FIELDS
+from precip_type_diag.constants import INPUT_PARAM_IDS, OUTPUT_PARAM_ID, OUTPUT_SHORT_NAME, REQUIRED_INPUT_FIELDS
 from precip_type_diag.gribio import (
     GribTemplateMessage,
     MemberHourJob,
     MissingFieldError,
     MissingFileError,
+    _scan_grib_file_sequential,
     _previous_step,
     bootstrap_eccodes_definitions,
     build_jobs,
@@ -124,6 +125,55 @@ def test_bootstrap_eccodes_definitions_is_idempotent(monkeypatch: pytest.MonkeyP
 
     assert combined == "/defs/local:/defs/ms:/eccodes/base"
     assert calls == ["/defs/local:/defs/ms:/eccodes/base"]
+
+
+def test_fast_scan_skips_discarded_3d_levels_before_decoding_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "input.grib2"
+    path.write_bytes(b"fake")
+    messages = [
+        {"paramId": INPUT_PARAM_IDS["T"], "values": np.array([270.0]), "name": "T0"},
+        {"paramId": INPUT_PARAM_IDS["T"], "values": np.array([271.0]), "name": "T1"},
+        {"paramId": INPUT_PARAM_IDS["T"], "values": np.array([272.0]), "name": "T2"},
+        {"paramId": INPUT_PARAM_IDS["TOT_PREC"], "values": np.array([1.0]), "name": "TOT_PREC"},
+    ]
+    pending = iter(messages)
+    decoded: list[str] = []
+    released: list[str] = []
+
+    def fake_codes_grib_new_from_file(handle):
+        return next(pending, None)
+
+    def fake_codes_get_long(message, key: str) -> int:
+        assert key == "paramId"
+        return int(message["paramId"])
+
+    def fake_codes_get_values(message):
+        decoded.append(str(message["name"]))
+        return message["values"]
+
+    def fake_codes_release(message) -> None:
+        released.append(str(message["name"]))
+
+    monkeypatch.setattr("precip_type_diag.gribio.eccodes.codes_grib_new_from_file", fake_codes_grib_new_from_file)
+    monkeypatch.setattr("precip_type_diag.gribio.eccodes.codes_get_long", fake_codes_get_long)
+    monkeypatch.setattr("precip_type_diag.gribio.eccodes.codes_get_values", fake_codes_get_values)
+    monkeypatch.setattr("precip_type_diag.gribio.eccodes.codes_release", fake_codes_release)
+    monkeypatch.setattr("precip_type_diag.gribio._reshape_message_values", lambda message, values: values)
+
+    fields, template = _scan_grib_file_sequential(
+        path,
+        ("T", "TOT_PREC"),
+        level_start_by_name={"T": 2},
+    )
+
+    assert template is None
+    np.testing.assert_array_equal(fields["T"], np.array([[272.0]]))
+    np.testing.assert_array_equal(fields["TOT_PREC"], np.array([1.0]))
+    assert decoded == ["T2", "TOT_PREC"]
+    assert released == ["T0", "T1", "T2", "TOT_PREC"]
 
 
 def test_missing_required_input_field_raises(monkeypatch: pytest.MonkeyPatch) -> None:

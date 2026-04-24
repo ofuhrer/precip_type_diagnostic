@@ -14,6 +14,48 @@ python -m pip install .
 This installs the package together with the required `numba`, `eccodes`, and
 MeteoSwiss ecCodes definition resources.
 
+## Tasna Setup
+
+On `tasna`, use the MeteoSwiss module Python rather than the system
+`/usr/bin/python3.11`, which may not include all standard-library extension
+modules required by `earthkit-data`.
+
+```bash
+module use /mch-environment/v8/modules
+module load python/3.11.7
+
+cd /users/olifu/work
+git clone git@github.com:ofuhrer/precip_type_diagnostic.git
+cd precip_type_diagnostic
+
+python -m venv .venv
+. .venv/bin/activate
+python -m ensurepip --upgrade
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e ".[test]"
+```
+
+If cloning from GitHub fails on `tasna`, configure SSH or HTTPS credentials
+first, or clone from an already available local copy.
+
+Validate the installation:
+
+```bash
+python -m py_compile src/precip_type_diag/*.py test/*.py
+PYTHONPATH=src python -m pytest -q
+PYTHONPATH=src python -m precip_type_diag --help
+```
+
+Run against the live cache:
+
+```bash
+PYTHONPATH=src python -m precip_type_diag \
+  --input-root /opr/osm/inn/cache \
+  --output-root /users/olifu/work/precip_type_diag_output \
+  --model ICON-CH2-EPS \
+  --run latest
+```
+
 ## Test Fixtures
 
 The repository does not check in the large real GRIB test fixtures. Fetch them
@@ -66,6 +108,11 @@ counts, total runtime, and one per-member summary. Each member summary contains
 `written`, `skipped`, `failed`, `category_counts`, and `runtime_s`.
 
 An extra copy of the same summary can be written with `--summary-json`.
+
+GRIB reads use small ecCodes index files cached under the system temporary
+directory. Set `PRECIP_TYPE_DIAG_GRIB_INDEX_CACHE=/path/to/cache` to choose a
+different location, or `PRECIP_TYPE_DIAG_GRIB_INDEX_CACHE=off` to disable
+persisted index caching.
 
 ## Validation
 

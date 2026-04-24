@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
 import os
 import re
 from datetime import timedelta
@@ -26,6 +27,9 @@ from .grid import GridInputs, diagnose_grid_categorical
 
 FORECAST_FILE_RE = re.compile(r"^lfff(\d{8})$")
 THREE_D_FIELDS = frozenset({"T", "P", "QV", "HHL"})
+GRIB_INDEX_CACHE_ENV = "PRECIP_TYPE_DIAG_GRIB_INDEX_CACHE"
+GRIB_INDEX_CACHE_DISABLED = frozenset({"0", "false", "no", "off", "none", ""})
+GRIB_INDEX_CACHE_VERSION = "v2"
 
 
 class MissingFieldError(RuntimeError):
@@ -65,6 +69,69 @@ class VerticalLevelSelection:
 
 def _package_definitions_dir() -> Path:
     return Path(__file__).resolve().parent / "definitions"
+
+
+def _grib_index_cache_dir() -> Path | None:
+    configured = os.environ.get(GRIB_INDEX_CACHE_ENV)
+    if configured is not None and configured.strip().lower() in GRIB_INDEX_CACHE_DISABLED:
+        return None
+    if configured:
+        return Path(configured)
+    return Path(tempfile.gettempdir()) / "precip_type_diag_grib_indexes"
+
+
+def _grib_index_cache_path(path: Path) -> Path | None:
+    cache_dir = _grib_index_cache_dir()
+    if cache_dir is None:
+        return None
+
+    source = Path(path).resolve()
+    stat = source.stat()
+    definitions_path = os.environ.get("ECCODES_DEFINITION_PATH", eccodes.codes_definition_path())
+    fingerprint = "|".join(
+        (
+            GRIB_INDEX_CACHE_VERSION,
+            str(source),
+            str(stat.st_size),
+            str(stat.st_mtime_ns),
+            definitions_path,
+            eccodes.codes_get_api_version(),
+        )
+    )
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+    return cache_dir / f"{digest}.idx"
+
+
+def _open_param_id_index(path: Path):
+    source = Path(path).resolve()
+    cache_path = _grib_index_cache_path(path)
+    if cache_path is None:
+        return eccodes.codes_index_new_from_file(str(source), ["paramId:l"])
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    if cache_path.exists():
+        return eccodes.codes_index_read(str(cache_path))
+
+    temp_path: Path | None = None
+    index = eccodes.codes_index_new_from_file(str(source), ["paramId:l"])
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=cache_path.parent,
+            prefix=f"{cache_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+        eccodes.codes_index_write(index, str(temp_path))
+        os.replace(temp_path, cache_path)
+    except Exception:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+        raise
+    finally:
+        eccodes.codes_index_release(index)
+
+    return eccodes.codes_index_read(str(cache_path))
 
 
 def _candidate_meteoswiss_definition_dirs() -> list[Path]:
@@ -364,7 +431,67 @@ def derive_vertical_level_selection(
     )
 
 
-def _scan_grib_file_fast(
+def _scan_grib_file_indexed(
+    path: Path,
+    required_fields: Iterable[str],
+    *,
+    level_start_by_name: dict[str, int] | None = None,
+    capture_template_for: str | None = None,
+) -> tuple[dict[str, np.ndarray], GribTemplateMessage | None]:
+    required_names = tuple(required_fields)
+    level_start_by_name = level_start_by_name or {}
+    arrays_3d: dict[str, list[np.ndarray]] = {name: [] for name in required_names if name in THREE_D_FIELDS}
+    arrays_2d: dict[str, np.ndarray] = {}
+    template: GribTemplateMessage | None = None
+
+    index = _open_param_id_index(path)
+    try:
+        for short_name in required_names:
+            eccodes.codes_index_select_long(index, "paramId", INPUT_PARAM_IDS[short_name])
+            message_index = 0
+            while True:
+                gid = eccodes.codes_new_from_index(index)
+                if gid is None:
+                    break
+                try:
+                    if short_name in THREE_D_FIELDS and message_index < level_start_by_name.get(short_name, 0):
+                        message_index += 1
+                        continue
+
+                    values = np.asarray(eccodes.codes_get_values(gid), dtype=float)
+                    values = _reshape_message_values(gid, values)
+
+                    if short_name in THREE_D_FIELDS:
+                        arrays_3d[short_name].append(values)
+                    else:
+                        arrays_2d[short_name] = values
+                        if capture_template_for == short_name and template is None:
+                            template = GribTemplateMessage(
+                                message_bytes=eccodes.codes_get_message(gid),
+                                values_shape=tuple(values.shape),
+                            )
+                    message_index += 1
+                finally:
+                    eccodes.codes_release(gid)
+    finally:
+        eccodes.codes_index_release(index)
+
+    result: dict[str, np.ndarray] = {}
+    for short_name in required_names:
+        if short_name in THREE_D_FIELDS:
+            messages = arrays_3d[short_name]
+            if not messages:
+                raise MissingFieldError(f"Missing {short_name} ({INPUT_PARAM_IDS[short_name]}) in {path}")
+            result[short_name] = np.stack(messages, axis=0)
+        else:
+            if short_name not in arrays_2d:
+                raise MissingFieldError(f"Missing {short_name} ({INPUT_PARAM_IDS[short_name]}) in {path}")
+            result[short_name] = arrays_2d[short_name]
+
+    return result, template
+
+
+def _scan_grib_file_sequential(
     path: Path,
     required_fields: Iterable[str],
     *,
@@ -390,14 +517,16 @@ def _scan_grib_file_fast(
                 if short_name is None:
                     continue
 
-                values = np.asarray(eccodes.codes_get_values(gid), dtype=float)
-                values = _reshape_message_values(gid, values)
                 message_index = message_indices[short_name]
                 message_indices[short_name] = message_index + 1
 
+                if short_name in THREE_D_FIELDS and message_index < level_start_by_name.get(short_name, 0):
+                    continue
+
+                values = np.asarray(eccodes.codes_get_values(gid), dtype=float)
+                values = _reshape_message_values(gid, values)
+
                 if short_name in THREE_D_FIELDS:
-                    if message_index < level_start_by_name.get(short_name, 0):
-                        continue
                     arrays_3d[short_name].append(values)
                 else:
                     arrays_2d[short_name] = values
@@ -422,6 +551,29 @@ def _scan_grib_file_fast(
             result[short_name] = arrays_2d[short_name]
 
     return result, template
+
+
+def _scan_grib_file_fast(
+    path: Path,
+    required_fields: Iterable[str],
+    *,
+    level_start_by_name: dict[str, int] | None = None,
+    capture_template_for: str | None = None,
+) -> tuple[dict[str, np.ndarray], GribTemplateMessage | None]:
+    try:
+        return _scan_grib_file_indexed(
+            path,
+            required_fields,
+            level_start_by_name=level_start_by_name,
+            capture_template_for=capture_template_for,
+        )
+    except (OSError, MissingFieldError, eccodes.CodesInternalError):
+        return _scan_grib_file_sequential(
+            path,
+            required_fields,
+            level_start_by_name=level_start_by_name,
+            capture_template_for=capture_template_for,
+        )
 
 
 def load_member_hour_fast(
