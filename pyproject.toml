@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "precip-type-diag"
+version = "0.1.0"
+description = "ICON precipitation-type diagnostic following Zukanovic MSc thesis."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy",
+  "numba>=0.65,<0.66",
+  "earthkit-data==0.19.3",
+  "eccodes==2.38.3",
+  "eccodes-cosmo-resources-python==2.38.3.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+precip_type_diag = [
+  "definitions/grib2/localConcepts/default/*.def",
+  "definitions/grib2/localConcepts/ecmf/*.def",
+  "definitions/grib2/localConcepts/edzw/*.def",
+  "definitions/grib2/localConcepts/lssw/*.def",
+  "definitions/grib2/tables/32/*.table",
+]

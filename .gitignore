@@ -1,0 +1,10 @@
+background/
+
+test/fixtures/real_icon_ch1_eps/*
+test/fixtures/real_icon_ch2_eps/*
+
+__pycache__/
+*.pyc
+.pytest_cache/
+*.nbc
+*.nbi
