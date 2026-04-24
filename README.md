@@ -1,24 +1,24 @@
 # precip_type_diag
 
-`precip_type_diag` is an ICON precipitation-type diagnostic for `ICON-CH1-EPS` and
-`ICON-CH2-EPS`. It implements the MeteoSwiss MSc-thesis method by Firdewsa
-Zukanovic, based on the Modified Bourgouin precipitation-type algorithm described
-by Birk et al. (2021).
+ICON precipitation-type diagnostic for MeteoSwiss `ICON-CH1-EPS` and
+`ICON-CH2-EPS`, following the Zukanovic MSc-thesis implementation of the
+Modified Bourgouin method.
 
-## Installation
+The package writes one categorical GRIB2 `PTYPE` field per member and forecast
+hour. It is categorical-only: no ensemble aggregation, probability products, or
+bias correction.
+
+## Install
 
 ```bash
 python -m pip install .
+python -m pip install -e ".[test]"
 ```
 
-This installs the package together with the required `numba`, `eccodes`, and
-MeteoSwiss ecCodes definition resources.
+## Tasna
 
-## Tasna Setup
-
-On `tasna`, use the MeteoSwiss module Python rather than the system
-`/usr/bin/python3.11`, which may not include all standard-library extension
-modules required by `earthkit-data`.
+Use the module Python on `tasna`; the system Python may lack required extension
+modules.
 
 ```bash
 module use /mch-environment/v8/modules
@@ -35,52 +35,20 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e ".[test]"
 ```
 
-If cloning from GitHub fails on `tasna`, configure SSH or HTTPS credentials
-first, or clone from an already available local copy.
+If GitHub clone fails, configure SSH or HTTPS credentials first.
 
-Validate the installation:
+## Run
 
-```bash
-python -m py_compile src/precip_type_diag/*.py test/*.py
-PYTHONPATH=src python -m pytest -q
-PYTHONPATH=src python -m precip_type_diag --help
-```
-
-Run against the live cache:
+Inspect a run:
 
 ```bash
 PYTHONPATH=src python -m precip_type_diag \
-  --input-root /opr/osm/inn/cache \
-  --output-root /users/olifu/work/precip_type_diag_output \
+  --input-run /path/to/run/icon \
   --model ICON-CH2-EPS \
-  --run latest
+  --report-only
 ```
 
-## Test Fixtures
-
-The repository does not check in the large real GRIB test fixtures. Fetch them
-from `tasna` with:
-
-```bash
-./scripts/fetch_test_fixtures.sh
-```
-
-This copies the current CH1/CH2 fixture set into `test/fixtures/`. The script
-skips files that already exist locally and discovers a suitable live cache run
-on `tasna` automatically. The fetched files are ignored by git.
-
-The fetch location can be customized:
-
-```bash
-REMOTE_HOST=tasna REMOTE_CACHE_ROOT=/opr/osm/inn/cache ./scripts/fetch_test_fixtures.sh
-./scripts/fetch_test_fixtures.sh /tmp/precip_type_diag_fixtures
-```
-
-Real-fixture tests skip automatically when the required files are not present.
-
-## Running
-
-Process a single member/hour from one ICON run:
+Process one member/hour:
 
 ```bash
 PYTHONPATH=src python -m precip_type_diag \
@@ -91,7 +59,7 @@ PYTHONPATH=src python -m precip_type_diag \
   --hours 04180000
 ```
 
-Process one full operational run:
+Process an operational run:
 
 ```bash
 PYTHONPATH=src python -m precip_type_diag \
@@ -101,27 +69,48 @@ PYTHONPATH=src python -m precip_type_diag \
   --run latest
 ```
 
-Operational mode writes one `summary.json` under the output run directory. The
-summary includes the model, resolved run id, input and output paths, runtime
-configuration, member list, total written/skipped/failed counts, merged category
-counts, total runtime, and one per-member summary. Each member summary contains
-`written`, `skipped`, `failed`, `category_counts`, and `runtime_s`.
+Operational mode writes `summary.json` under the output run directory. Use
+`--summary-json` to write an extra copy.
 
-An extra copy of the same summary can be written with `--summary-json`.
+## Fixtures
 
-GRIB reads use small ecCodes index files cached under the system temporary
-directory. Set `PRECIP_TYPE_DIAG_GRIB_INDEX_CACHE=/path/to/cache` to choose a
-different location, or `PRECIP_TYPE_DIAG_GRIB_INDEX_CACHE=off` to disable
-persisted index caching. Cached index files older than 10 days are pruned
-best-effort when the cache is used.
+Large real GRIB fixtures are not tracked. Fetch them from `tasna` when needed:
 
-## Validation
+```bash
+./scripts/fetch_test_fixtures.sh
+```
 
-Run the synthetic and mocked tests without requiring real fixtures:
+Optional customizations:
+
+```bash
+REMOTE_HOST=tasna REMOTE_CACHE_ROOT=/opr/osm/inn/cache ./scripts/fetch_test_fixtures.sh
+./scripts/fetch_test_fixtures.sh /tmp/precip_type_diag_fixtures
+```
+
+Real-fixture tests skip when the files are absent.
+
+## Validate
 
 ```bash
 python -m py_compile src/precip_type_diag/*.py test/*.py
 PYTHONPATH=src python -m pytest -q
 ```
 
-When real fixtures have been fetched, the CH1/CH2 GRIB smoke tests also run.
+Benchmark:
+
+```bash
+PYTHONPATH=src python -m precip_type_diag.benchmark --case real-ch2
+PYTHONPATH=src python -m precip_type_diag.benchmark --case synthetic
+```
+
+## Notes
+
+- Required input fields: `T`, `P`, `QV`, `HHL`, `TOT_PREC`, `T_G`.
+- Forecast steps use ICON `DDHHMMSS` strings.
+- Hourly precipitation is `TOT_PREC(current) - TOT_PREC(previous)`.
+- The production path uses ecCodes I/O, a `numba` categorical backend, and a
+  fixed 12 km vertical cutoff from `HHL`.
+- GRIB index files are cached under the system temp directory by default. Set
+  `PRECIP_TYPE_DIAG_GRIB_INDEX_CACHE=/path/to/cache` to choose a location, or
+  `PRECIP_TYPE_DIAG_GRIB_INDEX_CACHE=off` to disable persisted caching. Cached
+  `.idx` files older than 10 days are pruned best-effort.

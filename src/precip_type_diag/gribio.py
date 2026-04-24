@@ -104,6 +104,19 @@ def _grib_index_cache_path(path: Path) -> Path | None:
     return cache_dir / f"{digest}.idx"
 
 
+def _discard_grib_index_cache(path: Path) -> None:
+    try:
+        cache_path = _grib_index_cache_path(path)
+    except OSError:
+        return
+    if cache_path is None:
+        return
+    try:
+        cache_path.unlink(missing_ok=True)
+    except OSError:
+        return
+
+
 def _prune_grib_index_cache(cache_dir: Path, *, max_age_days: int = GRIB_INDEX_MAX_AGE_DAYS) -> None:
     cutoff = time.time() - max_age_days * 24 * 60 * 60
     try:
@@ -448,6 +461,26 @@ def derive_vertical_level_selection(
     )
 
 
+def _finalize_scanned_fields(
+    path: Path,
+    required_names: tuple[str, ...],
+    arrays_3d: dict[str, list[np.ndarray]],
+    arrays_2d: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    result: dict[str, np.ndarray] = {}
+    for short_name in required_names:
+        if short_name in THREE_D_FIELDS:
+            messages = arrays_3d[short_name]
+            if not messages:
+                raise MissingFieldError(f"Missing {short_name} ({INPUT_PARAM_IDS[short_name]}) in {path}")
+            result[short_name] = np.stack(messages, axis=0)
+        else:
+            if short_name not in arrays_2d:
+                raise MissingFieldError(f"Missing {short_name} ({INPUT_PARAM_IDS[short_name]}) in {path}")
+            result[short_name] = arrays_2d[short_name]
+    return result
+
+
 def _scan_grib_file_indexed(
     path: Path,
     required_fields: Iterable[str],
@@ -493,19 +526,7 @@ def _scan_grib_file_indexed(
     finally:
         eccodes.codes_index_release(index)
 
-    result: dict[str, np.ndarray] = {}
-    for short_name in required_names:
-        if short_name in THREE_D_FIELDS:
-            messages = arrays_3d[short_name]
-            if not messages:
-                raise MissingFieldError(f"Missing {short_name} ({INPUT_PARAM_IDS[short_name]}) in {path}")
-            result[short_name] = np.stack(messages, axis=0)
-        else:
-            if short_name not in arrays_2d:
-                raise MissingFieldError(f"Missing {short_name} ({INPUT_PARAM_IDS[short_name]}) in {path}")
-            result[short_name] = arrays_2d[short_name]
-
-    return result, template
+    return _finalize_scanned_fields(path, required_names, arrays_3d, arrays_2d), template
 
 
 def _scan_grib_file_sequential(
@@ -555,19 +576,7 @@ def _scan_grib_file_sequential(
             finally:
                 eccodes.codes_release(gid)
 
-    result: dict[str, np.ndarray] = {}
-    for short_name in required_names:
-        if short_name in THREE_D_FIELDS:
-            messages = arrays_3d[short_name]
-            if not messages:
-                raise MissingFieldError(f"Missing {short_name} ({INPUT_PARAM_IDS[short_name]}) in {path}")
-            result[short_name] = np.stack(messages, axis=0)
-        else:
-            if short_name not in arrays_2d:
-                raise MissingFieldError(f"Missing {short_name} ({INPUT_PARAM_IDS[short_name]}) in {path}")
-            result[short_name] = arrays_2d[short_name]
-
-    return result, template
+    return _finalize_scanned_fields(path, required_names, arrays_3d, arrays_2d), template
 
 
 def _scan_grib_file_fast(
@@ -585,6 +594,7 @@ def _scan_grib_file_fast(
             capture_template_for=capture_template_for,
         )
     except (OSError, MissingFieldError, eccodes.CodesInternalError):
+        _discard_grib_index_cache(path)
         return _scan_grib_file_sequential(
             path,
             required_fields,

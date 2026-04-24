@@ -15,6 +15,7 @@ from precip_type_diag.gribio import (
     MemberHourJob,
     MissingFieldError,
     MissingFileError,
+    _scan_grib_file_fast,
     _prune_grib_index_cache,
     _scan_grib_file_sequential,
     _previous_step,
@@ -148,6 +149,31 @@ def test_grib_index_cache_prunes_files_older_than_max_age(tmp_path: Path) -> Non
     assert not old_index.exists()
     assert fresh_index.exists()
     assert unrelated.exists()
+
+
+def test_fast_scan_discards_bad_index_cache_before_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "input.grib2"
+    path.write_bytes(b"fake")
+    discarded: list[Path] = []
+
+    def broken_indexed(*args, **kwargs):
+        raise MissingFieldError("bad index")
+
+    def fallback_scan(*args, **kwargs):
+        return {"TOT_PREC": np.array([1.0])}, None
+
+    monkeypatch.setattr("precip_type_diag.gribio._scan_grib_file_indexed", broken_indexed)
+    monkeypatch.setattr("precip_type_diag.gribio._scan_grib_file_sequential", fallback_scan)
+    monkeypatch.setattr("precip_type_diag.gribio._discard_grib_index_cache", discarded.append)
+
+    fields, template = _scan_grib_file_fast(path, ("TOT_PREC",))
+
+    np.testing.assert_array_equal(fields["TOT_PREC"], np.array([1.0]))
+    assert template is None
+    assert discarded == [path]
 
 
 def test_fast_scan_skips_discarded_3d_levels_before_decoding_values(
