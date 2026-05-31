@@ -1,22 +1,34 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from precip_type_diag.constants import INPUT_PARAM_IDS
 from precip_type_diag.operational import (
-    OperationalConfig,
+    FdbRun,
+    _fields_by_step,
+    _has_complete_param,
+    _member_keys,
+    _ml_fields_by_step,
+    _parse_step,
+    _step_expr,
+    _step_token,
     config_for_model,
-    process_member_run,
-    resolve_run_id,
+    parse_members,
     run_operational,
 )
 
 
 class FakeField:
-    def __init__(self, values: np.ndarray):
-        self._values = np.asarray(values)
+    def __init__(self, metadata: dict[str, object], values: np.ndarray | None = None):
+        self._metadata = metadata
+        self._values = np.asarray([1.0] if values is None else values)
+
+    def metadata(self, key: str):
+        return self._metadata[key]
 
     def to_numpy(self, flatten: bool = False):
         if flatten:
@@ -24,307 +36,216 @@ class FakeField:
         return self._values
 
 
-class FakeFieldSet:
-    def __init__(self, mapping: dict[int, list[np.ndarray]]):
-        self._mapping = {key: [FakeField(values) for values in value] for key, value in mapping.items()}
+def test_member_and_step_helpers() -> None:
+    assert _member_keys("000") == ("cf", None)
+    assert _member_keys("007") == ("pf", 7)
+    assert _parse_step("60m") == 1
+    assert _parse_step("2h") == 2
+    assert _parse_step("3") == 3
+    assert _step_expr([1, 2, 3]) == "1/to/3/by/1"
+    assert _step_token(25) == "01010000"
 
-    def sel(self, *, paramId: int):
-        return self._mapping.get(paramId, [])
-
-
-def _touch(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"")
-
-
-def _fake_sources(member_dir: Path) -> dict[str, FakeFieldSet]:
-    return {
-        str(member_dir / "lfff00000000c"): FakeFieldSet(
-            {500008: [np.ones((2, 2)) * 3000.0, np.ones((2, 2)) * 1500.0, np.zeros((2, 2))]}
-        ),
-        str(member_dir / "lfff00000000"): FakeFieldSet(
-            {
-                500014: [np.ones((2, 2)) * level for level in (270.0, 268.0)],
-                500001: [np.ones((2, 2)) * level for level in (80000.0, 90000.0)],
-                500035: [np.ones((2, 2)) * level for level in (0.002, 0.003)],
-                500041: [np.ones((2, 2)) * 0.5],
-                500010: [np.ones((2, 2)) * 269.15],
-            }
-        ),
-        str(member_dir / "lfff00010000"): FakeFieldSet(
-            {
-                500014: [np.ones((2, 2)) * level for level in (270.0, 268.0)],
-                500001: [np.ones((2, 2)) * level for level in (80000.0, 90000.0)],
-                500035: [np.ones((2, 2)) * level for level in (0.002, 0.003)],
-                500041: [np.ones((2, 2)) * 1.0],
-                500010: [np.ones((2, 2)) * 269.15],
-            }
-        ),
-        str(member_dir / "lfff00020000"): FakeFieldSet(
-            {
-                500014: [np.ones((2, 2)) * level for level in (270.0, 268.0)],
-                500001: [np.ones((2, 2)) * level for level in (80000.0, 90000.0)],
-                500035: [np.ones((2, 2)) * level for level in (0.002, 0.003)],
-                500041: [np.ones((2, 2)) * 2.5],
-                500010: [np.ones((2, 2)) * 269.15],
-            }
-        ),
-    }
+    with pytest.raises(ValueError, match="hourly"):
+        _parse_step("30m")
+    with pytest.raises(ValueError, match="contiguous"):
+        _step_expr([1, 3])
 
 
-def _fake_scan_factory(member_dir: Path):
-    fake_sources = _fake_sources(member_dir)
+def test_parse_members_validates_model_members() -> None:
+    assert parse_members("all", "ICON-CH1-EPS") == tuple(f"{member:03d}" for member in range(11))
+    assert parse_members("000,010", "ICON-CH1-EPS") == ("000", "010")
 
-    def fake_scan(path: Path, required_fields, *, level_start_by_name=None, capture_template_for=None):
-        fieldset = fake_sources[str(path)]
-        outputs: dict[str, np.ndarray] = {}
-        level_start_by_name = level_start_by_name or {}
-        for short_name in required_fields:
-            param_id = {
-                "T": 500014,
-                "P": 500001,
-                "QV": 500035,
-                "TOT_PREC": 500041,
-                "T_G": 500010,
-                "HHL": 500008,
-            }[short_name]
-            selected = fieldset.sel(paramId=param_id)
-            if short_name in {"T", "P", "QV", "HHL"}:
-                values = np.stack([field.to_numpy(flatten=False) for field in selected], axis=0)
-                start = level_start_by_name.get(short_name, 0)
-                outputs[short_name] = values[start:]
-            else:
-                outputs[short_name] = selected[0].to_numpy(flatten=False)
-        template = object() if capture_template_for is not None else None
-        return outputs, template
-
-    return fake_scan
+    with pytest.raises(ValueError, match="Invalid member"):
+        parse_members("0", "ICON-CH1-EPS")
+    with pytest.raises(ValueError, match="not available"):
+        parse_members("011", "ICON-CH1-EPS")
 
 
-def test_resolve_run_id_picks_latest(tmp_path: Path) -> None:
-    root = tmp_path / "cache"
-    for run in ["26042312_741", "26042318_741"]:
-        (root / "ICON-CH2-EPS" / "FCST_RING" / run / "icon").mkdir(parents=True)
+def test_field_grouping_uses_metadata_step_and_param() -> None:
+    fields = [
+        FakeField({"paramId": INPUT_PARAM_IDS["T"], "step": "1", "level": 2}),
+        FakeField({"paramId": INPUT_PARAM_IDS["T"], "step": "1", "level": 1}),
+        FakeField({"paramId": INPUT_PARAM_IDS["P"], "endStep": "2h", "level": 1}),
+        FakeField({"paramId": INPUT_PARAM_IDS["TOT_PREC"], "step": "60m"}),
+    ]
 
-    assert resolve_run_id("ICON-CH2-EPS", root, "latest") == "26042318_741"
+    ml = _ml_fields_by_step(fields[:3])
+    by_step = _fields_by_step(fields[3:])
 
-
-def test_process_member_run_reuses_previous_tot_prec_from_prior_step(monkeypatch, tmp_path: Path) -> None:
-    member_dir = tmp_path / "icon" / "000"
-    _touch(member_dir / "lfff00000000c")
-    _touch(member_dir / "lfff00010000")
-    _touch(member_dir / "lfff00020000")
-    writes: list[tuple[Path, np.ndarray]] = []
-
-    monkeypatch.setattr("precip_type_diag.operational.bootstrap_eccodes_definitions", lambda: "")
-    monkeypatch.setattr("precip_type_diag.operational._is_valid_output", lambda path: False)
-    monkeypatch.setattr("precip_type_diag.operational._scan_grib_file_fast", _fake_scan_factory(member_dir))
-    selection_calls: list[float] = []
-
-    def fake_selection(full_half_level_height_m, vertical_cutoff_m):
-        selection_calls.append(vertical_cutoff_m)
-
-        class Selection:
-            full_level_start = 0
-            half_level_start = 0
-            retained_full_levels = 2
-
-        return Selection()
-
-    def fake_diag(grid_inputs, *, chunk_size=4096, precip_mask_threshold_mm=0.0):
-        return np.where(grid_inputs.total_precip_mm > 1.0, 5, 1).astype(np.int32)
-
-    def fake_write(template_field, categorical_codes, destination):
-        writes.append((destination, np.asarray(categorical_codes)))
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(b"GRIB")
-        return destination
-
-    monkeypatch.setattr("precip_type_diag.operational.diagnose_grid_categorical", fake_diag)
-    monkeypatch.setattr("precip_type_diag.operational.write_output_grib", fake_write)
-    monkeypatch.setattr("precip_type_diag.operational.derive_vertical_level_selection", fake_selection)
-
-    summary = process_member_run(
-        member_dir=member_dir,
-        member="000",
-        output_dir=tmp_path / "out",
-        precip_mask_threshold_mm=0.0,
-        vertical_cutoff_m=9000.0,
-        overwrite=False,
-    )
-
-    assert [item["step"] for item in summary["skipped"]] == ["00010000"]
-    assert [item["step"] for item in summary["written"]] == ["00020000"]
-    assert writes[0][1].shape == (2, 2)
-    np.testing.assert_array_equal(writes[0][1], np.full((2, 2), 5, dtype=np.int32))
-    assert selection_calls == [9000.0]
+    assert sorted(ml) == [1, 2]
+    assert len(ml[1]["T"]) == 2
+    assert len(ml[2]["P"]) == 1
+    assert sorted(by_step) == [1]
 
 
-def test_process_member_run_records_hhl_setup_failure(monkeypatch, tmp_path: Path) -> None:
-    member_dir = tmp_path / "icon" / "000"
-    _touch(member_dir / "lfff00000000c")
-
-    monkeypatch.setattr("precip_type_diag.operational.bootstrap_eccodes_definitions", lambda: "")
-
-    def broken_scan(path: Path, required_fields, *, level_start_by_name=None, capture_template_for=None):
-        raise RuntimeError("cannot read HHL")
-
-    monkeypatch.setattr("precip_type_diag.operational._scan_grib_file_fast", broken_scan)
-
-    summary = process_member_run(
-        member_dir=member_dir,
-        member="000",
-        output_dir=tmp_path / "out",
-        precip_mask_threshold_mm=0.0,
-        overwrite=False,
-    )
-
-    assert summary["member"] == "000"
-    assert summary["written"] == []
-    assert summary["skipped"] == []
-    assert summary["failed"] == [{"member": "000", "reason": "RuntimeError: cannot read HHL"}]
-    assert isinstance(summary["runtime_s"], float)
-
-
-def test_process_member_run_records_vertical_selection_failure(monkeypatch, tmp_path: Path) -> None:
-    member_dir = tmp_path / "icon" / "000"
-    _touch(member_dir / "lfff00000000c")
-
-    monkeypatch.setattr("precip_type_diag.operational.bootstrap_eccodes_definitions", lambda: "")
-    monkeypatch.setattr("precip_type_diag.operational._scan_grib_file_fast", _fake_scan_factory(member_dir))
-
-    def broken_selection(full_half_level_height_m, vertical_cutoff_m):
-        raise ValueError("bad cutoff")
-
-    monkeypatch.setattr("precip_type_diag.operational.derive_vertical_level_selection", broken_selection)
-
-    summary = process_member_run(
-        member_dir=member_dir,
-        member="000",
-        output_dir=tmp_path / "out",
-        precip_mask_threshold_mm=0.0,
-        overwrite=False,
-    )
-
-    assert summary["written"] == []
-    assert summary["skipped"] == []
-    assert summary["failed"] == [{"member": "000", "reason": "ValueError: bad cutoff"}]
-    assert isinstance(summary["runtime_s"], float)
-
-
-def test_process_member_run_records_step_scan_failure(monkeypatch, tmp_path: Path) -> None:
-    member_dir = tmp_path / "icon" / "000"
-    _touch(member_dir / "lfff00000000c")
-    _touch(member_dir / "lfff00000000")
-
-    fake_scan = _fake_scan_factory(member_dir)
-
-    def scan_with_step_failure(path: Path, required_fields, *, level_start_by_name=None, capture_template_for=None):
-        if path.name == "lfff00000000":
-            raise RuntimeError("cannot read forecast")
-        return fake_scan(
-            path,
-            required_fields,
-            level_start_by_name=level_start_by_name,
-            capture_template_for=capture_template_for,
-        )
-
-    monkeypatch.setattr("precip_type_diag.operational.bootstrap_eccodes_definitions", lambda: "")
-    monkeypatch.setattr("precip_type_diag.operational._scan_grib_file_fast", scan_with_step_failure)
-
-    summary = process_member_run(
-        member_dir=member_dir,
-        member="000",
-        output_dir=tmp_path / "out",
-        precip_mask_threshold_mm=0.0,
-        overwrite=False,
-    )
-
-    assert summary["written"] == []
-    assert summary["skipped"] == []
-    assert summary["failed"] == [{"step": "00000000", "reason": "RuntimeError: cannot read forecast"}]
-    assert isinstance(summary["runtime_s"], float)
-
-
-def test_process_member_run_skips_existing_valid_outputs(monkeypatch, tmp_path: Path) -> None:
-    member_dir = tmp_path / "icon" / "000"
-    _touch(member_dir / "lfff00000000c")
-    _touch(member_dir / "lfff00000000")
-    _touch(member_dir / "lfff00010000")
-    output_dir = tmp_path / "out"
-    existing = output_dir / "000" / "lfff00010000.ptype.grib2"
-    _touch(existing)
-
-    monkeypatch.setattr("precip_type_diag.operational.bootstrap_eccodes_definitions", lambda: "")
-    monkeypatch.setattr("precip_type_diag.operational._is_valid_output", lambda path: path == existing)
-    monkeypatch.setattr("precip_type_diag.operational._scan_grib_file_fast", _fake_scan_factory(member_dir))
-    writes: list[Path] = []
-
-    def fake_diag(grid_inputs, *, chunk_size=4096, precip_mask_threshold_mm=0.0):
-        return np.ones((2, 2), dtype=np.int32)
-
-    def fake_write(template_field, categorical_codes, destination):
-        writes.append(destination)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(b"GRIB")
-        return destination
-
-    monkeypatch.setattr("precip_type_diag.operational.diagnose_grid_categorical", fake_diag)
-    monkeypatch.setattr("precip_type_diag.operational.write_output_grib", fake_write)
-
-    summary = process_member_run(
-        member_dir=member_dir,
-        member="000",
-        output_dir=output_dir,
-        precip_mask_threshold_mm=0.0,
-        overwrite=False,
-    )
-
-    assert summary["written"][0]["step"] == "00000000"
-    assert summary["skipped"][0]["reason"] == "existing valid output"
-    assert writes == [output_dir / "000" / "lfff00000000.ptype.grib2"]
-
-
-def test_run_operational_writes_summary_for_latest_run(monkeypatch, tmp_path: Path) -> None:
-    root = tmp_path / "cache"
-    run_dir = root / "ICON-CH1-EPS" / "FCST_RING" / "26042315_639" / "icon" / "000"
-    run_dir.mkdir(parents=True)
-
-    test_config = OperationalConfig(
-        model="ICON-CH1-EPS",
-        members=("000",),
-        input_root=root,
-        output_root=tmp_path / "products",
-        precip_mask_threshold_mm=0.1,
-        max_workers=1,
-    )
-
-    monkeypatch.setattr("precip_type_diag.operational.config_for_model", lambda *args, **kwargs: test_config)
+def test_has_complete_param_checks_steps_levels_and_timespan(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "precip_type_diag.operational.process_member_run",
-        lambda **kwargs: {
-            "member": "000",
-            "written": [{"step": "00010000", "path": "dummy"}],
-            "skipped": [],
-            "failed": [],
-            "category_counts": {"no_precip": 0, "rain": 4, "freezing_rain": 0, "snow": 0, "ice_pellets": 0, "freezing_drizzle": 0, "freezing_rain_on_ground": 0},
-            "runtime_s": 1.0,
-        },
+        "precip_type_diag.operational._fdb_utils_list",
+        lambda expr: {"timespan": ["none"], "step": ["0", "1h"], "levelist": [1, 2, 3]},
     )
 
-    summary = run_operational(model="ICON-CH1-EPS", run="latest")
+    assert _has_complete_param(
+        model="ICON-CH2-EPS",
+        member="000",
+        date="20260531",
+        time_value="1800",
+        param=INPUT_PARAM_IDS["HHL"],
+        levtype="ml",
+        timespan="none",
+        expected_steps={0, 1},
+        expected_levels={1, 2},
+    )
+    assert not _has_complete_param(
+        model="ICON-CH2-EPS",
+        member="000",
+        date="20260531",
+        time_value="1800",
+        param=INPUT_PARAM_IDS["HHL"],
+        levtype="ml",
+        timespan="fs",
+        expected_steps={0},
+    )
+    assert not _has_complete_param(
+        model="ICON-CH2-EPS",
+        member="000",
+        date="20260531",
+        time_value="1800",
+        param=INPUT_PARAM_IDS["HHL"],
+        levtype="ml",
+        timespan="none",
+        expected_steps={0, 2},
+    )
 
-    summary_path = tmp_path / "products" / "ICON-CH1-EPS" / "26042315_639" / "summary.json"
-    assert summary["run"] == "26042315_639"
-    assert summary["written_count"] == 1
-    assert summary_path.exists()
 
-
-def test_config_for_model_rejects_invalid_precip_threshold() -> None:
-    with pytest.raises(ValueError, match="non-negative"):
-        config_for_model("ICON-CH1-EPS", precip_mask_threshold_mm=-0.1)
-
-
-def test_config_for_model_rejects_unknown_model() -> None:
+def test_config_for_model_rejects_invalid_values() -> None:
     with pytest.raises(ValueError, match="Unsupported model"):
         config_for_model("ICON-CH3-EPS")
+    with pytest.raises(ValueError, match="non-negative"):
+        config_for_model("ICON-CH1-EPS", precip_mask_threshold_mm=-0.1)
+    with pytest.raises(ValueError, match="positive"):
+        config_for_model("ICON-CH1-EPS", chunk_size=0)
+    with pytest.raises(ValueError, match="not available"):
+        config_for_model("ICON-CH1-EPS", members=("011",))
+
+
+def test_run_operational_writes_summary_for_fixed_fdb_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    processed: list[FdbRun] = []
+    caplog.set_level(logging.INFO, logger="precip_type_diag.operational")
+
+    def fake_process_member(**kwargs):
+        run = kwargs["run"] if "run" in kwargs else None
+        assert run is None
+        processed.append(
+            FdbRun(
+                date=kwargs["date"],
+                time=kwargs["time_value"],
+                model="icon-ch1-eps",
+                member=kwargs["member"],
+                type="cf" if kwargs["member"] == "000" else "pf",
+                number=None if kwargs["member"] == "000" else int(kwargs["member"]),
+                max_step=kwargs["max_step"],
+            )
+        )
+        return {
+            "run": {"member": kwargs["member"]},
+            "steps": 2,
+            "written": 2,
+            "timings_s": {
+                "discovery_s": 0.0,
+                "static_request_s": 1.0,
+                "static_decode_s": 0.0,
+                "request_s": 2.0,
+                "decode_s": 3.0,
+                "diagnose_s": 4.0,
+                "write_s": 5.0,
+            },
+            "wall_s": 1.0,
+        }
+
+    monkeypatch.setattr("precip_type_diag.operational._configure_meteoswiss_definitions", lambda: None)
+    monkeypatch.setattr("precip_type_diag.operational._warm_diagnostic", lambda: None)
+    monkeypatch.setattr("precip_type_diag.operational._process_member", fake_process_member)
+    monkeypatch.setattr("precip_type_diag.operational.collect_runtime_provenance", lambda: {"git": {"commit": "abc"}})
+
+    summary = run_operational(
+        model="ICON-CH1-EPS",
+        members=("000", "001"),
+        date="20260531",
+        time_value="1800",
+        max_step=1,
+        output_root=tmp_path,
+        workers=1,
+        prefetch=False,
+    )
+
+    summary_path = tmp_path / "ICON-CH1-EPS" / "20260531" / "1800" / "summary.json"
+    assert summary_path.exists()
+    assert summary["failed"] == {}
+    assert summary["processed_members"] == ["000", "001"]
+    assert summary["timings_s"]["request_s"] == 4.0
+    assert summary["data_quality"]["total_columns"] == 0
+    assert summary["provenance"] == {"git": {"commit": "abc"}}
+    assert [run.member for run in processed] == ["000", "001"]
+    assert "starting operational run model=ICON-CH1-EPS" in caplog.text
+    assert "finished operational run model=ICON-CH1-EPS processed=2 failed=0" in caplog.text
+
+
+def test_run_operational_discovers_latest_complete_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    discovered = FdbRun(
+        date="20260531",
+        time="1800",
+        model="icon-ch2-eps",
+        member="000",
+        type="cf",
+        number=None,
+        max_step=1,
+        discovery_s=7.0,
+    )
+
+    monkeypatch.setattr("precip_type_diag.operational._configure_meteoswiss_definitions", lambda: None)
+    monkeypatch.setattr("precip_type_diag.operational._warm_diagnostic", lambda: None)
+    monkeypatch.setattr("precip_type_diag.operational.discover_complete_run", lambda **kwargs: discovered)
+    monkeypatch.setattr(
+        "precip_type_diag.operational._process_member",
+        lambda **kwargs: {"run": {"member": kwargs["member"]}, "timings_s": {}, "written": 0, "steps": 0, "wall_s": 0.0},
+    )
+
+    summary = run_operational(
+        model="ICON-CH2-EPS",
+        members=("000",),
+        max_step=1,
+        output_root=tmp_path,
+        workers=1,
+    )
+
+    assert summary["date"] == "20260531"
+    assert summary["time"] == "1800"
+    assert summary["discovery_s"] == 7.0
+
+
+def test_run_operational_records_member_failures(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fake_process_member(**kwargs):
+        if kwargs["member"] == "001":
+            raise RuntimeError("bad member")
+        return {"run": {"member": kwargs["member"]}, "timings_s": {}, "written": 0, "steps": 0, "wall_s": 0.0}
+
+    monkeypatch.setattr("precip_type_diag.operational._configure_meteoswiss_definitions", lambda: None)
+    monkeypatch.setattr("precip_type_diag.operational._warm_diagnostic", lambda: None)
+    monkeypatch.setattr("precip_type_diag.operational._process_member", fake_process_member)
+
+    summary = run_operational(
+        model="ICON-CH1-EPS",
+        members=("000", "001"),
+        date="20260531",
+        time_value="1800",
+        max_step=0,
+        output_root=tmp_path,
+        workers=1,
+    )
+
+    assert summary["processed_members"] == ["000"]
+    assert summary["failed"] == {"001": "RuntimeError: bad member"}

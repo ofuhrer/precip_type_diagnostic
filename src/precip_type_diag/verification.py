@@ -1,4 +1,4 @@
-"""Verification helpers for prototype regression and observations."""
+"""Verification helpers for prototype, column, and observation validation."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from earthkit.data import from_source
 
 from .constants import FREEZING_PRECIP_TYPES, PRECIPITATION_TYPE_NAMES, PrecipitationTypeCode
 from .gribio import bootstrap_eccodes_definitions
+from .profile import ColumnProfile, diagnose_column
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,34 @@ class PrototypeRegressionCase:
 class ObservationRecord:
     predicted: PrecipitationTypeCode
     observed: PrecipitationTypeCode
+
+
+@dataclass(frozen=True)
+class ColumnValidationCase:
+    name: str
+    temperature_k: np.ndarray
+    pressure_pa: np.ndarray
+    specific_humidity: np.ndarray
+    full_level_height_m: np.ndarray
+    total_precip_mm: float
+    ground_temperature_c: float
+    expected: PrecipitationTypeCode
+    metadata: dict[str, object]
+
+
+def _code_name(code: PrecipitationTypeCode) -> str:
+    return PRECIPITATION_TYPE_NAMES[code]
+
+
+def _as_float_1d(value: object, name: str) -> np.ndarray:
+    array = np.asarray(value, dtype=float)
+    if array.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional, got shape {array.shape}")
+    if array.size == 0:
+        raise ValueError(f"{name} must not be empty")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values")
+    return array
 
 
 def load_categorical_grib(path: Path) -> np.ndarray:
@@ -87,6 +116,84 @@ def _parse_code(value: str | int) -> PrecipitationTypeCode:
         if normalized == name:
             return code
     raise ValueError(f"Unknown precipitation type code: {value}")
+
+
+def load_column_validation_manifest(path: Path) -> list[ColumnValidationCase]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    cases: list[ColumnValidationCase] = []
+    for entry in payload["cases"]:
+        temperature_k = _as_float_1d(entry["temperature_k"], "temperature_k")
+        pressure_pa = _as_float_1d(entry["pressure_pa"], "pressure_pa")
+        specific_humidity = _as_float_1d(entry["specific_humidity"], "specific_humidity")
+        full_level_height_m = _as_float_1d(entry["full_level_height_m"], "full_level_height_m")
+        if not (
+            temperature_k.size
+            == pressure_pa.size
+            == specific_humidity.size
+            == full_level_height_m.size
+        ):
+            raise ValueError(f"Column validation case {entry['name']!r} has inconsistent full-level array lengths")
+
+        total_precip_mm = float(entry["total_precip_mm"])
+        ground_temperature_c = float(entry["ground_temperature_c"])
+        if not np.isfinite(total_precip_mm):
+            raise ValueError(f"Column validation case {entry['name']!r} has non-finite total_precip_mm")
+        if not np.isfinite(ground_temperature_c):
+            raise ValueError(f"Column validation case {entry['name']!r} has non-finite ground_temperature_c")
+
+        cases.append(
+            ColumnValidationCase(
+                name=str(entry["name"]),
+                temperature_k=temperature_k,
+                pressure_pa=pressure_pa,
+                specific_humidity=specific_humidity,
+                full_level_height_m=full_level_height_m,
+                total_precip_mm=total_precip_mm,
+                ground_temperature_c=ground_temperature_c,
+                expected=_parse_code(entry["expected"]),
+                metadata=dict(entry.get("metadata", {})),
+            )
+        )
+    if not cases:
+        raise ValueError(f"Column validation manifest {path} does not contain any cases")
+    return cases
+
+
+def run_column_validation_manifest(manifest_path: Path) -> dict[str, object]:
+    cases = load_column_validation_manifest(manifest_path)
+    results: list[dict[str, object]] = []
+    for case in cases:
+        diagnostics = diagnose_column(
+            ColumnProfile(
+                temperature_k=case.temperature_k,
+                pressure_pa=case.pressure_pa,
+                specific_humidity=case.specific_humidity,
+                full_level_height_m=case.full_level_height_m,
+                total_precip_mm=case.total_precip_mm,
+                ground_temperature_c=case.ground_temperature_c,
+            )
+        )
+        actual = diagnostics.categorical_code
+        results.append(
+            {
+                "name": case.name,
+                "expected": int(case.expected),
+                "expected_name": _code_name(case.expected),
+                "actual": int(actual),
+                "actual_name": _code_name(actual),
+                "passed": actual == case.expected,
+                "metadata": case.metadata,
+            }
+        )
+
+    failures = [item for item in results if not item["passed"]]
+    return {
+        "manifest": str(manifest_path),
+        "cases": results,
+        "n_cases": len(results),
+        "n_failed": len(failures),
+        "all_passed": not failures,
+    }
 
 
 def load_observation_records_csv(path: Path) -> list[ObservationRecord]:

@@ -8,45 +8,78 @@ import pytest
 from precip_type_diag.__main__ import main
 
 
-def test_report_only_prints_run_report_without_output_dir(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    report = {"members": ["000"], "hours_by_member": {"000": ["00000000"]}}
-    calls: list[Path] = []
+def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    calls: list[dict[str, object]] = []
 
-    def fake_report_for_run(input_run: Path) -> dict[str, object]:
-        calls.append(input_run)
-        return report
+    def fake_run_operational(**kwargs):
+        calls.append(kwargs)
+        return {"failed": {}, "ok": True}
 
-    monkeypatch.setattr("precip_type_diag.__main__.report_for_run", fake_report_for_run)
+    monkeypatch.setattr("precip_type_diag.__main__.run_operational", fake_run_operational)
     monkeypatch.setattr(
         "sys.argv",
         [
             "precip_type_diag",
-            "--input-run",
-            "/tmp/icon",
             "--model",
-            "ICON-CH2-EPS",
-            "--report-only",
+            "ICON-CH1-EPS",
+            "--output-root",
+            "/products",
+            "--members",
+            "000,001",
+            "--date",
+            "20260531",
+            "--time",
+            "1800",
+            "--max-step",
+            "3",
+            "--lookback-days",
+            "1",
+            "--chunk-size",
+            "2",
+            "--workers",
+            "4",
+            "--summary-json",
+            "/tmp/summary.json",
+            "--no-prefetch",
+            "--skip-validation",
+            "--precip-mask-threshold-mm",
+            "0.25",
         ],
     )
 
     assert main() == 0
-    assert calls == [Path("/tmp/icon")]
-    assert json.loads(capsys.readouterr().out) == report
+    assert calls == [
+        {
+            "model": "ICON-CH1-EPS",
+            "output_root": Path("/products"),
+            "members": ("000", "001"),
+            "date": "20260531",
+            "time_value": "1800",
+            "max_step": 3,
+            "lookback_days": 1,
+            "chunk_size": 2,
+            "workers": 4,
+            "prefetch": False,
+            "validate_inputs": False,
+            "precip_mask_threshold_mm": 0.25,
+            "vertical_cutoff_m": 12000.0,
+            "summary_json": Path("/tmp/summary.json"),
+        }
+    ]
+    assert json.loads(capsys.readouterr().out) == {"failed": {}, "ok": True}
 
 
-def test_debug_mode_requires_output_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_requires_date_and_time_together(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "sys.argv",
         [
             "precip_type_diag",
-            "--input-run",
-            "/tmp/icon",
             "--model",
             "ICON-CH2-EPS",
-            "--members",
-            "000",
-            "--hours",
-            "00000000",
+            "--output-root",
+            "/products",
+            "--date",
+            "20260531",
         ],
     )
 
@@ -56,45 +89,17 @@ def test_debug_mode_requires_output_dir(monkeypatch: pytest.MonkeyPatch) -> None
     assert exc_info.value.code == 2
 
 
-def test_operational_mode_passes_cli_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    calls: list[dict[str, object]] = []
-
-    def fake_run_operational(**kwargs):
-        calls.append(kwargs)
-        return {"ok": True}
-
-    monkeypatch.setattr("precip_type_diag.__main__.run_operational", fake_run_operational)
+def test_cli_returns_failure_when_any_member_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("precip_type_diag.__main__.run_operational", lambda **kwargs: {"failed": {"001": "boom"}})
     monkeypatch.setattr(
         "sys.argv",
         [
             "precip_type_diag",
-            "--input-root",
-            "/cache",
-            "--output-root",
-            "/products",
             "--model",
-            "ICON-CH1-EPS",
-            "--run",
-            "26042315_639",
-            "--summary-json",
-            "/tmp/summary.json",
-            "--overwrite",
-            "--precip-mask-threshold-mm",
-            "0.25",
+            "ICON-CH2-EPS",
+            "--output-root",
+            str(tmp_path),
         ],
     )
 
-    assert main() == 0
-
-    assert calls == [
-        {
-            "model": "ICON-CH1-EPS",
-            "run": "26042315_639",
-            "input_root": Path("/cache"),
-            "output_root": Path("/products"),
-            "precip_mask_threshold_mm": 0.25,
-            "overwrite": True,
-            "summary_json": Path("/tmp/summary.json"),
-        }
-    ]
-    assert json.loads(capsys.readouterr().out) == {"ok": True}
+    assert main() == 1

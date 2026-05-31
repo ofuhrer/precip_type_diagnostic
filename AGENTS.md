@@ -3,26 +3,33 @@
 ## Purpose
 
 `precip_type_diag` implements a categorical precipitation-type diagnostic for
-MeteoSwiss `ICON-CH1-EPS` and `ICON-CH2-EPS`. It follows the Zukanovic
-MSc-thesis method based on the Modified Bourgouin algorithm.
+MeteoSwiss `ICON-CH1-EPS` and `ICON-CH2-EPS`. It follows Firdewsa Zukanovic's
+MSc thesis method, based on the Modified Bourgouin algorithm.
 
-Outputs are one categorical GRIB2 `PTYPE` field per member/forecast hour and, in
-operational mode, a `summary.json`. The scope is intentionally limited: no
-ensemble aggregation, probability GRIBs, bias correction, or alternative
-diagnostics.
+The production path is FDB-only. It reads realtime FDB fields on Balfrin and
+writes one categorical GRIB2 `PTYPE` field per member/forecast hour plus
+`summary.json`.
+
+## Read First
+
+- `README.md`: fresh setup and operator run instructions.
+- `docs/science-and-architecture.md`: scientific method, input/output contract,
+  and FDB architecture.
 
 ## Layout
 
 - `src/precip_type_diag/profile.py`: pure Python column reference logic.
 - `src/precip_type_diag/numba_backend.py`: accelerated categorical backend.
 - `src/precip_type_diag/grid.py`: grid preparation and production diagnosis.
-- `src/precip_type_diag/gribio.py`: ecCodes setup, GRIB reading/writing, job discovery.
-- `src/precip_type_diag/operational.py`: full-run member processing and summaries.
-- `src/precip_type_diag/definitions/`: local ecCodes overlay for `PTYPE`; edit carefully.
-- `test/`: pytest suite with synthetic, mocked, and optional real-GRIB tests.
-- `docs/`: discovery and acceleration notes.
+- `src/precip_type_diag/gribio.py`: ecCodes definition setup, vertical
+  truncation, and GRIB writing.
+- `src/precip_type_diag/operational.py`: FDB discovery, validation, retrieval,
+  prefetching, member multiprocessing, and summaries.
+- `src/precip_type_diag/definitions/`: local ecCodes overlay for `PTYPE`.
+- `test/`: pytest suite with synthetic and mocked orchestration tests.
 
-Large GRIB fixtures under `test/fixtures/` are local-only and ignored by git.
+There is no file-based input path, no fixture-fetch script, and no bundled real
+GRIB fixture data.
 
 ## Commands
 
@@ -30,49 +37,56 @@ Large GRIB fixtures under `test/fixtures/` are local-only and ignored by git.
 python -m pip install -e ".[test]"
 python -m py_compile src/precip_type_diag/*.py test/*.py
 PYTHONPATH=src python -m pytest -q
+PYTHONPATH=src python -m precip_type_diag.benchmark
 ```
 
-Run examples:
+Run a Balfrin smoke test:
 
 ```bash
-PYTHONPATH=src python -m precip_type_diag --input-run /path/to/run/icon --model ICON-CH2-EPS --report-only
-PYTHONPATH=src python -m precip_type_diag --input-root /opr/osm/inn/cache --output-root /path/to/output --model ICON-CH2-EPS --run latest
-PYTHONPATH=src python -m precip_type_diag.benchmark --case real-ch2
+uenv run --view=realtime fdb/5.18:v3 -- \
+  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
+  .venv-fdb/bin/python -m precip_type_diag \
+  --model ICON-CH2-EPS \
+  --members 000 \
+  --max-step 1 \
+  --output-root /users/$USER/work/ptype-fdb-smoke
+```
+
+Run a full CH2 production-style job:
+
+```bash
+uenv run --view=realtime fdb/5.18:v3 -- \
+  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
+  .venv-fdb/bin/python -m precip_type_diag \
+  --model ICON-CH2-EPS \
+  --members all \
+  --workers 4 \
+  --output-root /users/$USER/work/ptype-fdb
 ```
 
 No formatter, linter, type checker, or CI workflow is currently configured.
 
 ## Constraints
 
-- Keep changes conservative and thesis-faithful unless fixing a clear bug.
-- Preserve public CLI flags, output codes, GRIB metadata, and `summary.json`
-  shape unless there is a compelling reason.
+- Keep changes thesis-faithful unless fixing a clear bug.
+- Preserve output category codes, GRIB metadata, and `summary.json` shape unless
+  there is a compelling reason.
 - The reference algorithm lives in `profile.py`; production optimizations must
   match it for tested cases.
 - Do not change scientific constants, `PTYPE` definitions, or
   `src/precip_type_diag/definitions/` casually.
-- Debug/single-job mode should fail loudly. Operational mode may record member
-  or step failures in summaries.
-- Avoid broad silent fallbacks. If fallback is necessary, keep it explicit and
-  covered by tests.
-- Do not commit generated caches, fetched fixtures, operational outputs, secrets,
-  SSH material, or machine-specific paths.
+- Avoid broad silent fallbacks. Operational member failures may be recorded in
+  summaries, but debug failures should stay visible.
+- Do not add dependencies unless there is a clear production need.
+- Do not commit generated caches, operational outputs, secrets, SSH material, or
+  machine-specific paths.
 
 ## Domain Notes
 
 - Required fields: `T`, `P`, `QV`, `HHL`, `TOT_PREC`, `T_G`.
-- Forecast-step strings use ICON `DDHHMMSS`.
 - Hourly precipitation is current `TOT_PREC` minus previous-hour `TOT_PREC`.
-- Production uses ecCodes I/O, `numba`, and a fixed 12 km vertical cutoff from
-  `HHL`.
+- Production uses FDB, ecCodes I/O, `numba`, and a fixed 12 km vertical cutoff
+  from `HHL`.
+- Prefetching is enabled by default; `--no-prefetch` is for debugging or timing
+  comparison.
 - Output category codes are `0, 1, 3, 5, 8, 12, 13`.
-
-## Test Guidance
-
-- Add or update tests for behavior-changing fixes.
-- Prefer synthetic tests for algorithm changes and mocked tests for orchestration
-  or I/O behavior.
-- Use real fixtures only for behavior that depends on real GRIB encoding or
-  metadata.
-- Real-fixture tests may skip when local ecCodes/MeteoSwiss definitions cannot
-  decode the files.

@@ -25,6 +25,38 @@ class GridInputs:
     ground_temperature_c: np.ndarray
 
 
+class GridDataQualityError(ValueError):
+    """Raised when active columns contain unusable input data."""
+
+
+@dataclass(frozen=True)
+class GridQualityReport:
+    total_columns: int
+    active_columns: int
+    invalid_total_precip_columns: int
+    invalid_ground_temperature_columns: int
+    invalid_profile_columns: int
+    invalid_active_ground_temperature_columns: int
+    invalid_active_profile_columns: int
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "total_columns": self.total_columns,
+            "active_columns": self.active_columns,
+            "invalid_total_precip_columns": self.invalid_total_precip_columns,
+            "invalid_ground_temperature_columns": self.invalid_ground_temperature_columns,
+            "invalid_profile_columns": self.invalid_profile_columns,
+            "invalid_active_ground_temperature_columns": self.invalid_active_ground_temperature_columns,
+            "invalid_active_profile_columns": self.invalid_active_profile_columns,
+        }
+
+
+@dataclass(frozen=True)
+class GridCategoricalResult:
+    categorical: np.ndarray
+    quality: GridQualityReport
+
+
 def _prepare_grid(inputs: GridInputs) -> tuple[
     tuple[int, ...],
     np.ndarray,
@@ -66,6 +98,70 @@ def _prepare_grid(inputs: GridInputs) -> tuple[
     precip_flat = total_precip_mm.reshape(n_columns)
     ground_flat = ground_temperature_c.reshape(n_columns)
     return flat_shape, temperature_2d, pressure_2d, humidity_2d, full_level_height_m, precip_flat, ground_flat
+
+
+def _finite_profile_columns(*arrays: np.ndarray) -> np.ndarray:
+    finite = np.ones(arrays[0].shape[1], dtype=bool)
+    for array in arrays:
+        finite &= np.all(np.isfinite(array), axis=0)
+    return finite
+
+
+def _format_bad_indices(mask: np.ndarray) -> str:
+    indices = np.flatnonzero(mask)
+    preview = ",".join(str(int(index)) for index in indices[:5])
+    if indices.size > 5:
+        preview += ",..."
+    return preview
+
+
+def _quality_report(
+    temperature_2d: np.ndarray,
+    pressure_2d: np.ndarray,
+    humidity_2d: np.ndarray,
+    full_level_height_m: np.ndarray,
+    precip_flat: np.ndarray,
+    ground_flat: np.ndarray,
+    precip_mask_threshold_mm: float,
+) -> tuple[GridQualityReport, np.ndarray]:
+    precip_finite = np.isfinite(precip_flat)
+    ground_finite = np.isfinite(ground_flat)
+    profile_finite = _finite_profile_columns(temperature_2d, pressure_2d, humidity_2d, full_level_height_m)
+    active = precip_finite & (precip_flat > precip_mask_threshold_mm)
+
+    quality = GridQualityReport(
+        total_columns=int(precip_flat.size),
+        active_columns=int(np.count_nonzero(active)),
+        invalid_total_precip_columns=int(np.count_nonzero(~precip_finite)),
+        invalid_ground_temperature_columns=int(np.count_nonzero(~ground_finite)),
+        invalid_profile_columns=int(np.count_nonzero(~profile_finite)),
+        invalid_active_ground_temperature_columns=int(np.count_nonzero(active & ~ground_finite)),
+        invalid_active_profile_columns=int(np.count_nonzero(active & ~profile_finite)),
+    )
+    return quality, active
+
+
+def _raise_for_bad_active_data(quality: GridQualityReport, active: np.ndarray, ground_flat: np.ndarray, profile_finite: np.ndarray | None = None) -> None:
+    if quality.invalid_total_precip_columns:
+        raise GridDataQualityError(
+            "total_precip_mm contains non-finite values in "
+            f"{quality.invalid_total_precip_columns} column(s)"
+        )
+    if quality.invalid_active_ground_temperature_columns:
+        bad = active & ~np.isfinite(ground_flat)
+        raise GridDataQualityError(
+            "ground_temperature_c contains non-finite values in active precipitation column(s): "
+            f"{_format_bad_indices(bad)}"
+        )
+    if quality.invalid_active_profile_columns:
+        if profile_finite is None:
+            bad_text = f"{quality.invalid_active_profile_columns} column(s)"
+        else:
+            bad_text = _format_bad_indices(active & ~profile_finite)
+        raise GridDataQualityError(
+            "temperature, pressure, humidity, or height contains non-finite values in active precipitation column(s): "
+            f"{bad_text}"
+        )
 
 
 def diagnose_grid(
@@ -118,6 +214,21 @@ def diagnose_grid_categorical(
     the microphysics-consistent output.
     """
 
+    return diagnose_grid_categorical_with_quality(
+        inputs,
+        chunk_size=chunk_size,
+        precip_mask_threshold_mm=precip_mask_threshold_mm,
+    ).categorical
+
+
+def diagnose_grid_categorical_with_quality(
+    inputs: GridInputs,
+    *,
+    chunk_size: int = 4096,
+    precip_mask_threshold_mm: float = 0.0,
+) -> GridCategoricalResult:
+    """Diagnose categorical classes and report input data-quality counters."""
+
     if chunk_size <= 0:
         raise ValueError(f"chunk_size must be positive, got {chunk_size}")
     (
@@ -130,10 +241,22 @@ def diagnose_grid_categorical(
         ground_flat,
     ) = _prepare_grid(inputs)
 
-    active = np.flatnonzero(precip_flat > precip_mask_threshold_mm)
+    quality, active_mask = _quality_report(
+        temperature_2d,
+        pressure_2d,
+        humidity_2d,
+        full_level_height_m,
+        precip_flat,
+        ground_flat,
+        precip_mask_threshold_mm,
+    )
+    profile_finite = _finite_profile_columns(temperature_2d, pressure_2d, humidity_2d, full_level_height_m)
+    _raise_for_bad_active_data(quality, active_mask, ground_flat, profile_finite)
+
+    active = np.flatnonzero(active_mask)
     categorical = np.zeros(precip_flat.size, dtype=np.int32)
     if active.size == 0:
-        return categorical.reshape(flat_shape)
+        return GridCategoricalResult(categorical=categorical.reshape(flat_shape), quality=quality)
 
     for start in range(0, active.size, chunk_size):
         stop = min(start + chunk_size, active.size)
@@ -153,4 +276,4 @@ def diagnose_grid_categorical(
             precip_mask_threshold_mm,
         )
 
-    return categorical.reshape(flat_shape)
+    return GridCategoricalResult(categorical=categorical.reshape(flat_shape), quality=quality)

@@ -1,47 +1,29 @@
-"""Benchmark entrypoint for the categorical precipitation-type diagnostic."""
+"""Synthetic benchmark for the categorical precipitation-type diagnostic."""
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from pathlib import Path
 import time
 
 import numpy as np
 
-from .gribio import MemberHourJob, load_member_hour
 from .grid import GridInputs, diagnose_grid_categorical
-
-
-DEFAULT_REAL_FIXTURE_DIR = Path("test/fixtures/real_icon_ch2_eps")
-DEFAULT_REAL_STEP = "04180000"
-DEFAULT_REAL_PREVIOUS_STEP = "04170000"
 
 
 @dataclass(frozen=True)
 class BenchmarkResult:
     case: str
-    load_s: float
     diagnose_s: float
     active_columns: int
     total_columns: int
-    retained_full_levels: int | None = None
+    retained_full_levels: int
 
     @property
     def columns_per_second(self) -> float:
         if self.diagnose_s <= 0.0:
             return 0.0
         return self.active_columns / self.diagnose_s
-
-
-def _real_fixture_job(fixture_dir: Path) -> MemberHourJob:
-    return MemberHourJob(
-        member="000",
-        step=DEFAULT_REAL_STEP,
-        current_file=fixture_dir / f"lfff{DEFAULT_REAL_STEP}",
-        previous_file=fixture_dir / f"lfff{DEFAULT_REAL_PREVIOUS_STEP}",
-        constants_file=fixture_dir / "lfff00000000c",
-    )
 
 
 def _synthetic_inputs(n_levels: int = 80, n_columns: int = 20000) -> GridInputs:
@@ -73,47 +55,6 @@ def _synthetic_inputs(n_levels: int = 80, n_columns: int = 20000) -> GridInputs:
     )
 
 
-def _measure_diagnostic(
-    inputs: GridInputs,
-    *,
-    chunk_size: int,
-    repeat: int,
-) -> tuple[float, np.ndarray]:
-    diagnose_grid_categorical(inputs, chunk_size=chunk_size)
-
-    best_time = float("inf")
-    latest = np.array([], dtype=np.int32)
-    for _ in range(repeat):
-        start = time.perf_counter()
-        latest = diagnose_grid_categorical(inputs, chunk_size=chunk_size)
-        elapsed = time.perf_counter() - start
-        if elapsed < best_time:
-            best_time = elapsed
-    return best_time, latest
-
-
-def run_real_case(
-    *,
-    fixture_dir: Path,
-    chunk_size: int,
-    repeat: int,
-) -> BenchmarkResult:
-    start = time.perf_counter()
-    inputs, _, selection = load_member_hour(_real_fixture_job(fixture_dir))
-    load_s = time.perf_counter() - start
-
-    diagnose_s, _ = _measure_diagnostic(inputs, chunk_size=chunk_size, repeat=repeat)
-    active_columns = int(np.count_nonzero(inputs.total_precip_mm > 0.0))
-    return BenchmarkResult(
-        case="real_ch2_fixture",
-        load_s=load_s,
-        diagnose_s=diagnose_s,
-        active_columns=active_columns,
-        total_columns=int(np.asarray(inputs.total_precip_mm).size),
-        retained_full_levels=selection.retained_full_levels,
-    )
-
-
 def run_synthetic_case(
     *,
     chunk_size: int,
@@ -122,12 +63,18 @@ def run_synthetic_case(
     n_columns: int,
 ) -> BenchmarkResult:
     inputs = _synthetic_inputs(n_levels=n_levels, n_columns=n_columns)
-    diagnose_s, _ = _measure_diagnostic(inputs, chunk_size=chunk_size, repeat=repeat)
+    diagnose_grid_categorical(inputs, chunk_size=chunk_size)
+
+    best_time = float("inf")
+    for _ in range(repeat):
+        start = time.perf_counter()
+        diagnose_grid_categorical(inputs, chunk_size=chunk_size)
+        best_time = min(best_time, time.perf_counter() - start)
+
     active_columns = int(np.count_nonzero(inputs.total_precip_mm > 0.0))
     return BenchmarkResult(
         case="synthetic_active_columns",
-        load_s=0.0,
-        diagnose_s=diagnose_s,
+        diagnose_s=best_time,
         active_columns=active_columns,
         total_columns=int(np.asarray(inputs.total_precip_mm).size),
         retained_full_levels=n_levels,
@@ -137,8 +84,6 @@ def run_synthetic_case(
 def _print_result(result: BenchmarkResult) -> None:
     print(f"case={result.case}")
     print("backend=numba")
-    print("reader_backend=fast")
-    print(f"load_s={result.load_s:.3f}")
     print(f"diagnose_s={result.diagnose_s:.3f}")
     print(f"active_columns={result.active_columns}")
     print(f"total_columns={result.total_columns}")
@@ -148,27 +93,18 @@ def _print_result(result: BenchmarkResult) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", choices=("real-ch2", "synthetic"), default="real-ch2")
     parser.add_argument("--chunk-size", type=int, default=4096)
     parser.add_argument("--repeat", type=int, default=3)
-    parser.add_argument("--fixture-dir", type=Path, default=DEFAULT_REAL_FIXTURE_DIR)
     parser.add_argument("--n-levels", type=int, default=80)
     parser.add_argument("--n-columns", type=int, default=20000)
     args = parser.parse_args(argv)
 
-    if args.case == "real-ch2":
-        result = run_real_case(
-            fixture_dir=args.fixture_dir,
-            chunk_size=args.chunk_size,
-            repeat=args.repeat,
-        )
-    else:
-        result = run_synthetic_case(
-            chunk_size=args.chunk_size,
-            repeat=args.repeat,
-            n_levels=args.n_levels,
-            n_columns=args.n_columns,
-        )
+    result = run_synthetic_case(
+        chunk_size=args.chunk_size,
+        repeat=args.repeat,
+        n_levels=args.n_levels,
+        n_columns=args.n_columns,
+    )
     _print_result(result)
     return 0
 
