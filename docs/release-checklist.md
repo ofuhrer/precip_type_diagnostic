@@ -32,17 +32,6 @@ python -m pip check
 Expected result: all commands pass. The pytest command enforces the configured
 coverage threshold.
 
-## Scientific Validation
-
-- Column validation manifest path:
-- GRIB regression manifest path:
-- Observation CSV/scoring artifact path:
-- Known exceptions:
-- Acceptance decision:
-
-Required result: all validation artifacts pass or exceptions are explicitly
-approved by the scientific owner.
-
 ## Balfrin Smoke Tests
 
 Run one smoke test for each operational model:

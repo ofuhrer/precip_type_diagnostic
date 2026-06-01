@@ -1,14 +1,11 @@
 # Release and Operations
 
 This project is not production-accepted solely because tests pass. A release
-must be tied to a code revision, dependency environment, scientific validation
+must be tied to a code revision, dependency environment, operational smoke-test
 record, and rollback plan.
 
 Use [release-checklist.md](release-checklist.md) as the release-candidate record
 template. Use [provenance.md](provenance.md) for source and licensing notes.
-Current working-tree Balfrin smoke evidence is archived in
-[acceptance/balfrin-smoke-20260531](acceptance/balfrin-smoke-20260531); rerun it
-from the accepted release tag before formal promotion.
 
 ## Pre-Release Gate
 
@@ -27,9 +24,7 @@ Before tagging a release:
    ```
 
 2. Confirm the GitHub Actions `tests` workflow passes for the release branch.
-3. Run the scientific validation manifests described in
-   [scientific-validation.md](scientific-validation.md).
-4. Run a Balfrin FDB smoke test for each operational model:
+3. Run a Balfrin FDB smoke test for each operational model:
 
    ```bash
    uenv run --view=realtime fdb/5.18:v3 -- \
@@ -45,11 +40,11 @@ Before tagging a release:
    The tested `fdb/5.18:v3` setup uses a uenv-created `.venv-fdb` for `numba`
    while keeping the FDB site-packages first on `PYTHONPATH`.
 
-5. Re-read at least one smoke-test output GRIB and verify `PTYPE` metadata and
+4. Re-read at least one smoke-test output GRIB and check `PTYPE` metadata and
    allowed category codes.
-6. Confirm `monitoring.json["ok"]` is `true` and archive `summary.json`,
-   `monitoring.json`, command output, validation results, and data owner approval
-   with the release decision.
+5. Confirm `monitoring.json["ok"]` is `true` and archive `summary.json`,
+   `monitoring.json`, command output, and data owner approval with the release
+   decision.
 
 ## Versioning
 
@@ -85,16 +80,9 @@ python -m precip_type_diag ...
 precip-type-diag ...
 ```
 
-The FDB profile extraction helper is available as:
-
-```bash
-python -m precip_type_diag.profile_samples ...
-precip-type-diag-profiles ...
-```
-
 Run inside the documented realtime FDB `uenv` and keep the `uenv` image version
-with the release record. If the FDB image changes, rerun smoke and scientific
-validation before promotion.
+with the release record. If the FDB image changes, rerun smoke tests before
+promotion.
 
 For `fdb/5.18:v3`, create `.venv-fdb` inside the uenv with
 `--system-site-packages`, install `numba`, then install this package with
@@ -125,57 +113,10 @@ write an extra copy to a scheduler-specific location. The Python logger
 member failure, member completion, and run completion records; route these logs
 and the monitoring JSON into the normal batch scheduler or monitoring system.
 
-## Profile Evidence Extraction
-
-Use `precip_type_diag.profile_samples` on Balfrin to extract raw ICON-CH column
-profiles for scientific review. Two modes are supported:
-
-- explicit points from a JSON file, using `flat_index` or `y`/`x`;
-- automatic candidate selection from the diagnostic category field.
-
-Example point file:
-
-```json
-{
-  "points": [
-    {
-      "name": "valley_station_case",
-      "y": 450,
-      "x": 620,
-      "expected": "freezing_rain",
-      "metadata": {
-        "station": "EXAMPLE",
-        "observation": "manual report or station classification"
-      }
-    }
-  ]
-}
-```
-
-Example automatic candidate extraction:
-
-```bash
-uenv run --view=realtime fdb/5.18:v3 -- \
-  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-  .venv-fdb/bin/python -m precip_type_diag.profile_samples \
-  --model ICON-CH1-EPS \
-  --member 000 \
-  --date YYYYMMDD \
-  --time HHMM \
-  --steps 0/to/3/by/1 \
-  --select-diagnostic-types rain,snow,freezing_rain,ice_pellets,freezing_drizzle \
-  --samples-per-type 2 \
-  --output /users/$USER/work/ptype-validation/icon-ch1-profile-candidates.json
-```
-
-Automatic candidates are not accepted validation truth. They are a triage aid for
-finding interesting gridpoints; independent observations must be added as
-`expected` labels before the cases can support scientific acceptance.
-
 ## Rollback
 
 Rollback means rerunning the previous accepted Git tag with its recorded
 dependency/uenv environment and replacing the candidate output tree atomically at
-the product publication boundary. Keep previous release tags and validation
-artifacts available until the new release has completed the agreed retention
+the product publication boundary. Keep previous release tags and operational
+records available until the new release has completed the agreed retention
 period.

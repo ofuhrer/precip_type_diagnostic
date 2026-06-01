@@ -40,6 +40,5 @@ Every accepted release should archive:
 - Python version and dependency versions;
 - realtime FDB `uenv` image name/version;
 - local MeteoSwiss ecCodes definition source, if overridden;
-- validation manifest outputs and observation-scoring summaries;
 - Balfrin smoke-test `summary.json` and `monitoring.json`;
 - approval owner and date.

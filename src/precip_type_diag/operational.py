@@ -24,7 +24,7 @@ import earthkit.data as ekd
 import numpy as np
 
 from .constants import DEFAULT_VERTICAL_CUTOFF_M, INPUT_PARAM_IDS
-from .gribio import derive_vertical_level_selection, validate_precip_mask_threshold_mm, write_output_grib
+from .gribio import check_precip_mask_threshold_mm, derive_vertical_level_selection, write_output_grib
 from .grid import GridInputs, diagnose_grid_categorical, diagnose_grid_categorical_with_quality
 from .monitoring import build_monitoring_status
 from .provenance import collect_runtime_provenance
@@ -131,7 +131,7 @@ class MemberProcessKwargs(TypedDict):
     output_root: Path
     chunk_size: int
     prefetch: bool
-    validate_inputs: bool
+    check_inputs: bool
     precip_mask_threshold_mm: float
     vertical_cutoff_m: float
 
@@ -151,7 +151,7 @@ def config_for_model(
     if model not in MODEL_TO_FDB:
         supported = ", ".join(sorted(MODEL_TO_FDB))
         raise ValueError(f"Unsupported model {model!r}; expected one of: {supported}")
-    threshold = validate_precip_mask_threshold_mm(0.0 if precip_mask_threshold_mm is None else precip_mask_threshold_mm)
+    threshold = check_precip_mask_threshold_mm(0.0 if precip_mask_threshold_mm is None else precip_mask_threshold_mm)
     effective_max_step = MODEL_MAX_STEP[model] if max_step is None else max_step
     if effective_max_step < 0:
         raise ValueError(f"max_step must be non-negative, got {effective_max_step}")
@@ -324,7 +324,7 @@ def _has_complete_param(
     return True
 
 
-def _validate_complete_run(model: str, member: str, date: str, time_value: str, max_step: int) -> None:
+def _check_complete_run(model: str, member: str, date: str, time_value: str, max_step: int) -> None:
     expected_steps = set(range(max_step + 1))
     expected_full_levels = set(range(1, FULL_LEVELS + 1))
     expected_half_levels = set(range(1, HALF_LEVELS + 1))
@@ -421,7 +421,7 @@ def discover_complete_run(
 
     for date, time_value in sorted(candidates, reverse=True):
         try:
-            _validate_complete_run(model, member, date, time_value, max_step)
+            _check_complete_run(model, member, date, time_value, max_step)
         except RuntimeError:
             continue
         type_value, number = _member_keys(member)
@@ -655,7 +655,7 @@ def process_member_run(
     output_model: str,
     chunk_size: int,
     prefetch: bool,
-    validate_inputs: bool,
+    check_inputs: bool,
     precip_mask_threshold_mm: float,
     vertical_cutoff_m: float,
 ) -> dict[str, object]:
@@ -671,8 +671,8 @@ def process_member_run(
         chunk_size,
         prefetch,
     )
-    if validate_inputs:
-        _validate_complete_run(output_model, run.member, run.date, run.time, run.max_step)
+    if check_inputs:
+        _check_complete_run(output_model, run.member, run.date, run.time, run.max_step)
 
     timings = Timings(discovery_s=run.discovery_s)
     wall_start = time.perf_counter()
@@ -784,7 +784,7 @@ def _process_member(
     output_root: Path,
     chunk_size: int,
     prefetch: bool,
-    validate_inputs: bool,
+    check_inputs: bool,
     precip_mask_threshold_mm: float,
     vertical_cutoff_m: float,
 ) -> dict[str, object]:
@@ -794,7 +794,7 @@ def _process_member(
         output_model=model,
         chunk_size=chunk_size,
         prefetch=prefetch,
-        validate_inputs=validate_inputs,
+        check_inputs=check_inputs,
         precip_mask_threshold_mm=precip_mask_threshold_mm,
         vertical_cutoff_m=vertical_cutoff_m,
     )
@@ -857,7 +857,7 @@ def run_operational(
     chunk_size: int = 2,
     workers: int | None = None,
     prefetch: bool = True,
-    validate_inputs: bool = True,
+    check_inputs: bool = True,
     precip_mask_threshold_mm: float | None = None,
     vertical_cutoff_m: float = DEFAULT_VERTICAL_CUTOFF_M,
     summary_json: Path | None = None,
@@ -913,7 +913,7 @@ def run_operational(
             "output_root": config.output_root,
             "chunk_size": config.chunk_size,
             "prefetch": config.prefetch,
-            "validate_inputs": validate_inputs,
+            "check_inputs": check_inputs,
             "precip_mask_threshold_mm": config.precip_mask_threshold_mm,
             "vertical_cutoff_m": config.vertical_cutoff_m,
         }

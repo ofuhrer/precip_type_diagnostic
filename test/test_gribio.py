@@ -10,8 +10,8 @@ from earthkit.data.encoders.grib import GribEncoder
 from precip_type_diag.constants import OUTPUT_PARAM_ID, OUTPUT_SHORT_NAME
 from precip_type_diag.gribio import (
     bootstrap_eccodes_definitions,
+    check_precip_mask_threshold_mm,
     derive_vertical_level_selection,
-    validate_precip_mask_threshold_mm,
     write_output_grib,
 )
 
@@ -44,13 +44,13 @@ def _write_template_grib(path: Path) -> object:
     return from_source("file", str(path))[0]
 
 
-def test_precip_mask_threshold_validation_rejects_negative_or_non_finite() -> None:
-    assert validate_precip_mask_threshold_mm(0.25) == 0.25
+def test_precip_mask_threshold_check_rejects_negative_or_non_finite() -> None:
+    assert check_precip_mask_threshold_mm(0.25) == 0.25
 
     with pytest.raises(ValueError, match="non-negative"):
-        validate_precip_mask_threshold_mm(-0.1)
+        check_precip_mask_threshold_mm(-0.1)
     with pytest.raises(ValueError, match="finite"):
-        validate_precip_mask_threshold_mm(float("nan"))
+        check_precip_mask_threshold_mm(float("nan"))
 
 
 def test_bootstrap_eccodes_definitions_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:

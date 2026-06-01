@@ -51,7 +51,7 @@ def test_member_and_step_helpers() -> None:
         _step_expr([1, 3])
 
 
-def test_parse_members_validates_model_members() -> None:
+def test_parse_members_rejects_unknown_model_members() -> None:
     assert parse_members("all", "ICON-CH1-EPS") == tuple(f"{member:03d}" for member in range(11))
     assert parse_members("000,010", "ICON-CH1-EPS") == ("000", "010")
 

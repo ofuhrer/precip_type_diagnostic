@@ -98,7 +98,7 @@ the additional code-table entry.
 The production CLI is FDB-only:
 
 ```text
-FDB discovery and validation
+FDB discovery and completeness checks
   -> HHL retrieval and vertical-level selection
   -> hourly field chunk retrieval
   -> decode arrays
@@ -120,7 +120,7 @@ Important implementation details:
   writing.
 - `write_output_grib()` uses the current-hour `TOT_PREC` FDB field as the output
   template, preserving grid geometry and run/member/step metadata while replacing
-  parameter metadata and values. It validates output shape, finite integer
+  parameter metadata and values. It checks output shape, finite integer
   category values, and the allowed `PTYPE` code set before writing.
 - `summary.json` includes runtime provenance: Python/platform metadata,
   dependency versions, Git commit, branch, dirty-worktree state, and command-line
@@ -144,7 +144,7 @@ The vertical cutoff is derived from `HHL`; levels above the cutoff are discarded
 before diagnosis. The cutoff is a performance optimization and should not be
 changed without scientific review.
 
-## Validation Strategy
+## Test Strategy
 
 The test suite has three layers:
 
@@ -153,7 +153,7 @@ The test suite has three layers:
 - `test_operational.py` and `test_cli.py`: mocked FDB orchestration and CLI
   behavior.
 
-Real FDB access is validated manually on Balfrin with a smoke run, for example:
+Real FDB access is checked manually on Balfrin with a smoke run, for example:
 
 ```bash
 uenv run --view=realtime fdb/5.18:v3 -- \
@@ -165,10 +165,7 @@ uenv run --view=realtime fdb/5.18:v3 -- \
   --output-root /users/$USER/work/ptype-fdb-smoke
 ```
 
-Working-tree Balfrin smoke evidence for `fdb/5.18:v3` is archived in
-[`docs/acceptance/balfrin-smoke-20260531`](acceptance/balfrin-smoke-20260531).
-Formal release acceptance should rerun the smoke test from the annotated release
-tag.
+Formal releases should rerun the smoke test from the annotated release tag.
 
 ## References
 

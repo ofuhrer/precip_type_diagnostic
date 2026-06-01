@@ -32,9 +32,6 @@ Core external references:
 
 See [docs/science-and-architecture.md](docs/science-and-architecture.md) for
 the implemented method, input/output contracts, and operational design.
-See [docs/scientific-validation.md](docs/scientific-validation.md) for the
-required real-case validation evidence and manifest formats for operational
-acceptance.
 See [docs/release-and-operations.md](docs/release-and-operations.md) for the
 release gate, provenance, monitoring, and rollback expectations.
 See [docs/provenance.md](docs/provenance.md) for licensing and source
@@ -55,7 +52,7 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install -e ".[test]"
 ```
 
-Validate the checkout:
+Check the checkout:
 
 ```bash
 python -m py_compile src/precip_type_diag/*.py test/*.py
@@ -76,8 +73,8 @@ PYTHONPATH=src python -m precip_type_diag.benchmark
 python -m pip check
 ```
 
-Local validation does not require FDB access. Running the production diagnostic
-does require the Balfrin realtime FDB environment.
+Local checks do not require FDB access. Running the production diagnostic does
+require the Balfrin realtime FDB environment.
 
 ## Balfrin Setup
 
@@ -115,9 +112,6 @@ uenv run --view=realtime fdb/5.18:v3 -- \
 
 If the available FDB image changes, replace `fdb/5.18:v3` with the current
 realtime FDB image shown by `uenv image ls fdb`.
-
-Balfrin smoke evidence for `fdb/5.18:v3` is archived under
-[docs/acceptance/balfrin-smoke-20260531](docs/acceptance/balfrin-smoke-20260531).
 
 ## Running
 
@@ -157,29 +151,6 @@ uenv run --view=realtime fdb/5.18:v3 -- \
   --output-root /users/$USER/work/ptype-fdb-smoke
 ```
 
-Extract candidate ICON-CH1-EPS column profiles from the same FDB environment for
-scientific review:
-
-```bash
-uenv run --view=realtime fdb/5.18:v3 -- \
-  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-  .venv-fdb/bin/python -m precip_type_diag.profile_samples \
-  --model ICON-CH1-EPS \
-  --member 000 \
-  --date 20260531 \
-  --time 1800 \
-  --steps 0/to/3/by/1 \
-  --select-diagnostic-types rain,snow,freezing_rain,ice_pellets,freezing_drizzle \
-  --samples-per-type 2 \
-  --output /users/$USER/work/ptype-fdb-smoke/icon-ch1-profile-candidates.json
-```
-
-Automatic profile candidates are selected from the diagnostic output and must be
-matched with independent observations before they count as scientific acceptance
-evidence. To extract preselected observation-backed gridpoints, pass
-`--points-json /path/to/points.json`; point entries can use `flat_index` or
-`y`/`x` and may include an `expected` precipitation type.
-
 Run a fixed FDB cycle instead of discovering the latest complete cycle:
 
 ```bash
@@ -212,7 +183,7 @@ Useful CLI options:
 - `--max-wall-s N` to make monitoring fail if wall-clock runtime exceeds `N`
   seconds
 - `--no-output-file-check` to skip post-run existence checks for expected GRIBs
-- `--skip-validation` to skip FDB completeness validation
+- `--skip-input-checks` to skip FDB completeness checks
 - `--precip-mask-threshold-mm X` to require at least `X` mm/h before diagnosing
 
 ## Outputs

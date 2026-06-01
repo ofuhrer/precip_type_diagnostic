@@ -84,7 +84,7 @@ def bootstrap_eccodes_definitions() -> str:
     return combined
 
 
-def validate_precip_mask_threshold_mm(value: float) -> float:
+def check_precip_mask_threshold_mm(value: float) -> float:
     threshold = float(value)
     if not np.isfinite(threshold):
         raise ValueError(f"precip_mask_threshold_mm must be finite, got {value!r}")
@@ -99,7 +99,7 @@ def _template_shape(template_field) -> tuple[int, ...] | None:
     return None
 
 
-def _validate_categorical_codes(categorical_codes: np.ndarray, expected_shape: tuple[int, ...] | None) -> np.ndarray:
+def _check_categorical_codes(categorical_codes: np.ndarray, expected_shape: tuple[int, ...] | None) -> np.ndarray:
     values = np.asarray(categorical_codes)
     if expected_shape is not None and tuple(values.shape) != tuple(expected_shape):
         raise ValueError(f"categorical_codes shape {values.shape} does not match template shape {expected_shape}")
@@ -166,7 +166,7 @@ def write_output_grib(
 ) -> Path:
     bootstrap_eccodes_definitions()
     shape = expected_shape if expected_shape is not None else _template_shape(template_field)
-    categorical = _validate_categorical_codes(categorical_codes, shape)
+    categorical = _check_categorical_codes(categorical_codes, shape)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:

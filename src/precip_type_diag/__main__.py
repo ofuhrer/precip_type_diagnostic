@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-wall-s", type=float, default=None, help="Fail monitoring if run wall time exceeds this limit")
     parser.add_argument("--no-output-file-check", action="store_true", help="Skip post-run checks for expected output GRIB files")
     parser.add_argument("--no-prefetch", action="store_true", help="Disable chunk prefetching")
-    parser.add_argument("--skip-validation", action="store_true", help="Skip FDB completeness validation")
+    parser.add_argument("--skip-input-checks", action="store_true", help="Skip FDB completeness checks")
     parser.add_argument("--precip-mask-threshold-mm", type=float, default=None)
     parser.add_argument("--vertical-cutoff-m", type=float, default=DEFAULT_VERTICAL_CUTOFF_M)
     return parser
@@ -63,7 +63,7 @@ def main() -> int:
         chunk_size=args.chunk_size,
         workers=args.workers,
         prefetch=not args.no_prefetch,
-        validate_inputs=not args.skip_validation,
+        check_inputs=not args.skip_input_checks,
         precip_mask_threshold_mm=args.precip_mask_threshold_mm,
         vertical_cutoff_m=args.vertical_cutoff_m,
         summary_json=args.summary_json,

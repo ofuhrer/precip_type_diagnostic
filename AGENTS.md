@@ -25,10 +25,8 @@ writes one categorical GRIB2 `PTYPE` field per member/forecast hour plus
   truncation, and GRIB writing.
 - `src/precip_type_diag/monitoring.py`: machine-readable operational status and
   alert evaluation from `summary.json`.
-- `src/precip_type_diag/operational.py`: FDB discovery, validation, retrieval,
+- `src/precip_type_diag/operational.py`: FDB discovery, completeness checks, retrieval,
   prefetching, member multiprocessing, and summaries.
-- `src/precip_type_diag/profile_samples.py`: FDB column-profile extraction for
-  scientific validation candidates and observation-backed gridpoints.
 - `src/precip_type_diag/definitions/`: local ecCodes overlay for `PTYPE`.
 - `test/`: pytest suite with synthetic and mocked orchestration tests.
 

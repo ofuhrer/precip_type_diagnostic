@@ -19,7 +19,6 @@ dependencies = [
 
 [project.scripts]
 precip-type-diag = "precip_type_diag.__main__:main"
-precip-type-diag-profiles = "precip_type_diag.profile_samples:main"
 
 [project.optional-dependencies]
 test = [
