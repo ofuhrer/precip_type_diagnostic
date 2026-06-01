@@ -72,9 +72,9 @@ candidate or accepted production release. The operational summary records:
 Do not promote output generated from a dirty worktree unless the exact diff is
 archived and approved.
 
-The current repository license is marked as pending in `LICENSE`. Resolve the
-code license and redistribution rights for bundled background PDFs before any
-external release or public artifact publication.
+The repository source code is licensed under the BSD 3-Clause License in
+`LICENSE`. Confirm redistribution rights for bundled background PDFs before any
+external release or public artifact publication that includes `background/`.
 
 ## Deployment
 

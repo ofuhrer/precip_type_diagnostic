@@ -112,6 +112,11 @@ Auto-selected profiles are diagnostic candidates only. They must be matched with
 independent observations and given `expected` labels before they count toward
 scientific acceptance.
 
+An initial ICON-CH1-EPS candidate set gathered on Balfrin is archived in
+[`scientific-validation-candidates/`](scientific-validation-candidates/). It
+contains unlabeled rain, snow, and freezing-drizzle profiles for scientific
+review and label assignment.
+
 ## GRIB Regression Manifest
 
 Use `run_prototype_regression_manifest()` to compare candidate categorical GRIB

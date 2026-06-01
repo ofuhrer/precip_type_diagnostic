@@ -3,10 +3,8 @@
 ## Repository Code
 
 The package implements an ICON precipitation-type diagnostic following Firdewsa
-Zukanovic's MSc thesis method and the upstream prototype listed below. The
-current repository license is intentionally marked as pending in `LICENSE`;
-do not treat the repository as externally redistributable until the responsible
-owner records the actual code license.
+Zukanovic's MSc thesis method and the upstream prototype listed below. Repository
+source code is licensed under the BSD 3-Clause License in `LICENSE`.
 
 ## Scientific Method Sources
 
