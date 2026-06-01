@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from importlib import metadata
-from pathlib import Path
 import platform
 import subprocess
 import sys
-from typing import Iterable
-
+from collections.abc import Iterable
+from importlib import metadata
+from pathlib import Path
 
 DEPENDENCY_DISTRIBUTIONS = (
     "precip-type-diag",

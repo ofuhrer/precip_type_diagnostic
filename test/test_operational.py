@@ -128,6 +128,18 @@ def test_config_for_model_rejects_invalid_values() -> None:
         config_for_model("ICON-CH1-EPS", members=("011",))
 
 
+def test_run_operational_rejects_non_positive_monitoring_wall_limit(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="max_wall_s must be positive"):
+        run_operational(
+            model="ICON-CH1-EPS",
+            members=("000",),
+            date="20260531",
+            time_value="1800",
+            output_root=tmp_path,
+            max_wall_s=0.0,
+        )
+
+
 def test_run_operational_writes_summary_for_fixed_fdb_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -183,8 +195,11 @@ def test_run_operational_writes_summary_for_fixed_fdb_run(
     )
 
     summary_path = tmp_path / "ICON-CH1-EPS" / "20260531" / "1800" / "summary.json"
+    monitoring_path = tmp_path / "ICON-CH1-EPS" / "20260531" / "1800" / "monitoring.json"
     assert summary_path.exists()
+    assert monitoring_path.exists()
     assert summary["failed"] == {}
+    assert summary["monitoring"]["ok"] is True
     assert summary["processed_members"] == ["000", "001"]
     assert summary["timings_s"]["request_s"] == 4.0
     assert summary["data_quality"]["total_columns"] == 0
@@ -249,3 +264,5 @@ def test_run_operational_records_member_failures(monkeypatch: pytest.MonkeyPatch
 
     assert summary["processed_members"] == ["000"]
     assert summary["failed"] == {"001": "RuntimeError: bad member"}
+    assert summary["monitoring"]["ok"] is False
+    assert summary["monitoring"]["alerts"][0]["code"] == "failed_members"

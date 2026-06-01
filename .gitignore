@@ -3,5 +3,9 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+src/*.egg-info/
 *.nbc
 *.nbi

@@ -73,6 +73,45 @@ PY
 The manifest runner rejects non-finite values and inconsistent vertical array
 lengths. This is intentional: validation cases should be explicit and auditable.
 
+Use `precip_type_diag.profile_samples` on Balfrin to extract candidate ICON-CH
+columns from realtime FDB. With explicit observation-backed gridpoints, include
+`expected` in the point file so the output cases can be passed to
+`run_column_validation_manifest()`:
+
+```json
+{
+  "points": [
+    {
+      "name": "example_station_freezing_rain",
+      "flat_index": 123456,
+      "expected": "freezing_rain",
+      "metadata": {
+        "station": "EXAMPLE",
+        "observation": "independent station/manual report"
+      }
+    }
+  ]
+}
+```
+
+For exploration, the same helper can auto-select columns by diagnostic category:
+
+```bash
+PYTHONPATH=src python -m precip_type_diag.profile_samples \
+  --model ICON-CH1-EPS \
+  --member 000 \
+  --date YYYYMMDD \
+  --time HHMM \
+  --steps 0/to/3/by/1 \
+  --select-diagnostic-types rain,snow,freezing_rain,ice_pellets,freezing_drizzle \
+  --samples-per-type 2 \
+  --output validation/icon-ch1-profile-candidates.json
+```
+
+Auto-selected profiles are diagnostic candidates only. They must be matched with
+independent observations and given `expected` labels before they count toward
+scientific acceptance.
+
 ## GRIB Regression Manifest
 
 Use `run_prototype_regression_manifest()` to compare candidate categorical GRIB

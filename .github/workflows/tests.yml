@@ -18,10 +18,16 @@ jobs:
       - name: Install package
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -e ".[test]"
+          python -m pip install -e ".[test,dev]"
 
       - name: Compile
         run: python -m py_compile src/precip_type_diag/*.py test/*.py
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Type check
+        run: python -m mypy
 
       - name: Test
         run: PYTHONPATH=src python -m pytest -q

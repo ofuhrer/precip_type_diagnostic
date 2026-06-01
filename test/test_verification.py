@@ -11,8 +11,8 @@ from precip_type_diag.constants import PrecipitationTypeCode
 from precip_type_diag.gribio import bootstrap_eccodes_definitions, write_output_grib
 from precip_type_diag.verification import (
     ObservationRecord,
-    load_observation_records_csv,
     load_column_validation_manifest,
+    load_observation_records_csv,
     run_column_validation_manifest,
     run_prototype_regression_manifest,
     score_observation_records,

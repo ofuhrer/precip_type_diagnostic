@@ -4,6 +4,12 @@ This project is not production-accepted solely because tests pass. A release
 must be tied to a code revision, dependency environment, scientific validation
 record, and rollback plan.
 
+Use [release-checklist.md](release-checklist.md) as the release-candidate record
+template. Use [provenance.md](provenance.md) for source and licensing notes.
+Current working-tree Balfrin smoke evidence is archived in
+[acceptance/balfrin-smoke-20260531](acceptance/balfrin-smoke-20260531); rerun it
+from the accepted release tag before formal promotion.
+
 ## Pre-Release Gate
 
 Before tagging a release:
@@ -11,9 +17,13 @@ Before tagging a release:
 1. Run local checks:
 
    ```bash
+   python -m pip install -e ".[test,dev]"
    python -m py_compile src/precip_type_diag/*.py test/*.py
+   python -m ruff check .
+   python -m mypy
    PYTHONPATH=src python -m pytest -q
    PYTHONPATH=src python -m precip_type_diag.benchmark
+   python -m pip check
    ```
 
 2. Confirm the GitHub Actions `tests` workflow passes for the release branch.
@@ -28,19 +38,30 @@ Before tagging a release:
      --model ICON-CH2-EPS \
      --members 000 \
      --max-step 1 \
+     --max-wall-s 900 \
      --output-root /users/$USER/work/ptype-fdb-smoke
    ```
 
+   The tested `fdb/5.18:v3` setup uses a uenv-created `.venv-fdb` for `numba`
+   while keeping the FDB site-packages first on `PYTHONPATH`.
+
 5. Re-read at least one smoke-test output GRIB and verify `PTYPE` metadata and
    allowed category codes.
-6. Archive the command output, `summary.json`, validation results, and data owner
-   approval with the release decision.
+6. Confirm `monitoring.json["ok"]` is `true` and archive `summary.json`,
+   `monitoring.json`, command output, validation results, and data owner approval
+   with the release decision.
 
 ## Versioning
 
-Use Git tags for released code. The package version in `pyproject.toml` must be
-updated for any release candidate or accepted production release. The operational
-summary records:
+Use annotated Git tags for released code:
+
+```bash
+git tag -a vX.Y.Z -m "precip_type_diag vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+The package version in `pyproject.toml` must be updated for any release
+candidate or accepted production release. The operational summary records:
 
 - Python implementation and version;
 - operating system summary;
@@ -51,6 +72,10 @@ summary records:
 Do not promote output generated from a dirty worktree unless the exact diff is
 archived and approved.
 
+The current repository license is marked as pending in `LICENSE`. Resolve the
+code license and redistribution rights for bundled background PDFs before any
+external release or public artifact publication.
+
 ## Deployment
 
 The production path is the module or console entry point:
@@ -60,25 +85,92 @@ python -m precip_type_diag ...
 precip-type-diag ...
 ```
 
+The FDB profile extraction helper is available as:
+
+```bash
+python -m precip_type_diag.profile_samples ...
+precip-type-diag-profiles ...
+```
+
 Run inside the documented realtime FDB `uenv` and keep the `uenv` image version
 with the release record. If the FDB image changes, rerun smoke and scientific
 validation before promotion.
 
+For `fdb/5.18:v3`, create `.venv-fdb` inside the uenv with
+`--system-site-packages`, install `numba`, then install this package with
+`--no-deps`. This preserves the FDB uenv Earthkit, ecCodes, and NumPy packages
+while adding the diagnostic's accelerated backend dependency.
+
 ## Monitoring
 
-Operational supervision should alert on:
+Every run writes:
 
-- non-zero process exit;
+- `<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/summary.json`
+- `<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/monitoring.json`
+
+`monitoring.json` is the scheduler/dashboard contract. It contains `status`,
+`ok`, `recommended_exit_code`, observed/expected counts, and critical alerts for:
+
 - non-empty `summary.json["failed"]`;
-- missing expected member or step counts;
-- non-zero active-column data-quality failures;
-- wall-clock runtime outside the accepted production window;
-- missing output GRIBs or missing `summary.json`.
+- requested members with no processed or failed result;
+- processed members whose step count or written GRIB count is not `max_step + 1`;
+- non-zero fatal data-quality counters for precipitation or active columns;
+- wall-clock runtime above `--max-wall-s`, when configured;
+- missing expected output GRIB files, unless `--no-output-file-check` is used.
 
-The Python logger `precip_type_diag.operational` emits run start, discovery,
-per-step progress, member failure, member completion, and run completion records.
-Operations should route these logs into the normal batch scheduler or monitoring
-system.
+The CLI exits with `monitoring.json["recommended_exit_code"]`, so any critical
+monitoring alert produces a non-zero process exit. Use `--monitoring-json` to
+write an extra copy to a scheduler-specific location. The Python logger
+`precip_type_diag.operational` emits run start, discovery, per-step progress,
+member failure, member completion, and run completion records; route these logs
+and the monitoring JSON into the normal batch scheduler or monitoring system.
+
+## Profile Evidence Extraction
+
+Use `precip_type_diag.profile_samples` on Balfrin to extract raw ICON-CH column
+profiles for scientific review. Two modes are supported:
+
+- explicit points from a JSON file, using `flat_index` or `y`/`x`;
+- automatic candidate selection from the diagnostic category field.
+
+Example point file:
+
+```json
+{
+  "points": [
+    {
+      "name": "valley_station_case",
+      "y": 450,
+      "x": 620,
+      "expected": "freezing_rain",
+      "metadata": {
+        "station": "EXAMPLE",
+        "observation": "manual report or station classification"
+      }
+    }
+  ]
+}
+```
+
+Example automatic candidate extraction:
+
+```bash
+uenv run --view=realtime fdb/5.18:v3 -- \
+  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
+  .venv-fdb/bin/python -m precip_type_diag.profile_samples \
+  --model ICON-CH1-EPS \
+  --member 000 \
+  --date YYYYMMDD \
+  --time HHMM \
+  --steps 0/to/3/by/1 \
+  --select-diagnostic-types rain,snow,freezing_rain,ice_pellets,freezing_drizzle \
+  --samples-per-type 2 \
+  --output /users/$USER/work/ptype-validation/icon-ch1-profile-candidates.json
+```
+
+Automatic candidates are not accepted validation truth. They are a triage aid for
+finding interesting gridpoints; independent observations must be added as
+`expected` labels before the cases can support scientific acceptance.
 
 ## Rollback
 

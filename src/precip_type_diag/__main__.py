@@ -22,6 +22,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chunk-size", type=int, default=2)
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--summary-json", type=Path, default=None)
+    parser.add_argument("--monitoring-json", type=Path, default=None)
+    parser.add_argument("--max-wall-s", type=float, default=None, help="Fail monitoring if run wall time exceeds this limit")
+    parser.add_argument("--no-output-file-check", action="store_true", help="Skip post-run checks for expected output GRIB files")
     parser.add_argument("--no-prefetch", action="store_true", help="Disable chunk prefetching")
     parser.add_argument("--skip-validation", action="store_true", help="Skip FDB completeness validation")
     parser.add_argument("--precip-mask-threshold-mm", type=float, default=None)
@@ -41,6 +44,8 @@ def main() -> int:
         parser.error(f"--chunk-size must be positive, got {args.chunk_size}")
     if args.workers is not None and args.workers <= 0:
         parser.error(f"--workers must be positive, got {args.workers}")
+    if args.max_wall_s is not None and args.max_wall_s <= 0:
+        parser.error(f"--max-wall-s must be positive, got {args.max_wall_s}")
 
     try:
         members = parse_members(args.members, args.model)
@@ -62,8 +67,14 @@ def main() -> int:
         precip_mask_threshold_mm=args.precip_mask_threshold_mm,
         vertical_cutoff_m=args.vertical_cutoff_m,
         summary_json=args.summary_json,
+        monitoring_json=args.monitoring_json,
+        max_wall_s=args.max_wall_s,
+        check_output_files=not args.no_output_file_check,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
+    monitoring = summary.get("monitoring", {})
+    if isinstance(monitoring, dict):
+        return int(monitoring.get("recommended_exit_code", 1 if summary["failed"] else 0))
     return 1 if summary["failed"] else 0
 
 

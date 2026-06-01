@@ -165,6 +165,11 @@ uenv run --view=realtime fdb/5.18:v3 -- \
   --output-root /users/$USER/work/ptype-fdb-smoke
 ```
 
+Working-tree Balfrin smoke evidence for `fdb/5.18:v3` is archived in
+[`docs/acceptance/balfrin-smoke-20260531`](acceptance/balfrin-smoke-20260531).
+Formal release acceptance should rerun the smoke test from the annotated release
+tag.
+
 ## References
 
 - Bourgouin, P. (2000): *A Method to Determine Precipitation Types*,

@@ -3,28 +3,31 @@
 from __future__ import annotations
 
 import ast
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
-from pathlib import Path
 import re
 import subprocess
 import tempfile
 import time
-from typing import Iterable
+from collections.abc import Iterable
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Protocol, TypedDict
 
-import eccodes  # Import before earthkit; some FDB uenv builds require it.
+# isort: off
+import eccodes as _eccodes  # noqa: F401  # Import before earthkit; some FDB uenv builds require it.
 import earthkit.data as ekd
+# isort: on
 import numpy as np
 
 from .constants import DEFAULT_VERTICAL_CUTOFF_M, INPUT_PARAM_IDS
 from .gribio import derive_vertical_level_selection, validate_precip_mask_threshold_mm, write_output_grib
 from .grid import GridInputs, diagnose_grid_categorical, diagnose_grid_categorical_with_quality
+from .monitoring import build_monitoring_status
 from .provenance import collect_runtime_provenance
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -107,10 +110,30 @@ class Timings:
 @dataclass(frozen=True)
 class FdbChunk:
     steps: list[int]
-    ml_by_step: dict[int, dict[str, list[object]]]
-    total_precip_by_step: dict[int, object]
-    ground_temperature_by_step: dict[int, object]
+    ml_by_step: dict[int, dict[str, list[FieldLike]]]
+    total_precip_by_step: dict[int, FieldLike]
+    ground_temperature_by_step: dict[int, FieldLike]
     request_s: float
+
+
+class FieldLike(Protocol):
+    def metadata(self, key: str) -> object: ...
+
+    def to_numpy(self, flatten: bool = False) -> np.ndarray: ...
+
+
+class MemberProcessKwargs(TypedDict):
+    model: str
+    member: str
+    date: str
+    time_value: str
+    max_step: int
+    output_root: Path
+    chunk_size: int
+    prefetch: bool
+    validate_inputs: bool
+    precip_mask_threshold_mm: float
+    vertical_cutoff_m: float
 
 
 def config_for_model(
@@ -267,7 +290,7 @@ def _parse_steps(values: Iterable[object]) -> set[int]:
 
 
 def _parse_levels(values: Iterable[object]) -> set[int]:
-    return {int(float(value)) for value in values}
+    return {int(float(str(value))) for value in values}
 
 
 def _has_complete_param(
@@ -432,40 +455,40 @@ def _make_run(model: str, member: str, date: str, time_value: str, max_step: int
     )
 
 
-def _request_fieldlist(request: dict[str, object]) -> tuple[object, float]:
+def _request_fieldlist(request: dict[str, object]) -> tuple[Iterable[FieldLike], float]:
     start = time.perf_counter()
     fieldlist = ekd.from_source("fdb", request, stream=True).to_fieldlist()
     return fieldlist, time.perf_counter() - start
 
 
-def _level(field) -> int:
-    return int(float(field.metadata("level")))
+def _level(field: FieldLike) -> int:
+    return int(float(str(field.metadata("level"))))
 
 
-def _step(field) -> int:
+def _step(field: FieldLike) -> int:
     try:
         return _parse_step(field.metadata("endStep"))
     except Exception:
         return _parse_step(field.metadata("step"))
 
 
-def _fields_by_step(fieldlist) -> dict[int, object]:
-    result: dict[int, object] = {}
+def _fields_by_step(fieldlist: Iterable[FieldLike]) -> dict[int, FieldLike]:
+    result: dict[int, FieldLike] = {}
     for field in fieldlist:
         result[_step(field)] = field
     return result
 
 
-def _ml_fields_by_step(fieldlist) -> dict[int, dict[str, list[object]]]:
-    result: dict[int, dict[str, list[object]]] = {}
+def _ml_fields_by_step(fieldlist: Iterable[FieldLike]) -> dict[int, dict[str, list[FieldLike]]]:
+    result: dict[int, dict[str, list[FieldLike]]] = {}
     for field in fieldlist:
-        param_id = int(field.metadata("paramId"))
+        param_id = int(str(field.metadata("paramId")))
         name = PARAM_NAME_BY_ID[param_id]
         result.setdefault(_step(field), {}).setdefault(name, []).append(field)
     return result
 
 
-def _stack_level_fields(fields: list[object], expected_count: int) -> np.ndarray:
+def _stack_level_fields(fields: list[FieldLike], expected_count: int) -> np.ndarray:
     ordered = sorted(fields, key=_level)
     if len(ordered) != expected_count:
         raise RuntimeError(f"Expected {expected_count} fields, got {len(ordered)}")
@@ -838,9 +861,14 @@ def run_operational(
     precip_mask_threshold_mm: float | None = None,
     vertical_cutoff_m: float = DEFAULT_VERTICAL_CUTOFF_M,
     summary_json: Path | None = None,
+    monitoring_json: Path | None = None,
+    max_wall_s: float | None = None,
+    check_output_files: bool = False,
 ) -> dict[str, object]:
     if (date is None) != (time_value is None):
         raise ValueError("date and time_value must be provided together")
+    if max_wall_s is not None and max_wall_s <= 0:
+        raise ValueError(f"max_wall_s must be positive, got {max_wall_s}")
 
     LOGGER.info("starting operational run model=%s members=%s", model, members if members is not None else "all")
     config = config_for_model(
@@ -875,7 +903,7 @@ def run_operational(
     results: dict[str, dict[str, object]] = {}
     failed: dict[str, str] = {}
     worker_count = min(config.max_workers, len(config.members))
-    kwargs_by_member = {
+    kwargs_by_member: dict[str, MemberProcessKwargs] = {
         member: {
             "model": model,
             "member": member,
@@ -911,7 +939,7 @@ def run_operational(
                     LOGGER.exception("member=%s failed", member)
 
     ordered_results = {member: results[member] for member in config.members if member in results}
-    summary = {
+    summary: dict[str, object] = {
         "model": model,
         "fdb_model": MODEL_TO_FDB[model],
         "date": date,
@@ -931,16 +959,27 @@ def run_operational(
         "wall_s": round(time.perf_counter() - start, 3),
         "per_member": ordered_results,
     }
+    monitoring = build_monitoring_status(
+        summary,
+        max_wall_s=max_wall_s,
+        check_output_files=check_output_files,
+    )
+    summary["monitoring"] = monitoring
 
     default_summary = config.output_root / model / str(date) / str(time_value) / "summary.json"
+    default_monitoring = config.output_root / model / str(date) / str(time_value) / "monitoring.json"
     _atomic_write_json(summary, default_summary)
+    _atomic_write_json(monitoring, default_monitoring)
     if summary_json is not None:
         _atomic_write_json(summary, summary_json)
+    if monitoring_json is not None:
+        _atomic_write_json(monitoring, monitoring_json)
     LOGGER.info(
-        "finished operational run model=%s processed=%s failed=%s wall_s=%.3f",
+        "finished operational run model=%s processed=%s failed=%s monitoring_status=%s wall_s=%.3f",
         model,
         len(ordered_results),
         len(failed),
+        monitoring["status"],
         summary["wall_s"],
     )
     return summary

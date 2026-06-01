@@ -23,8 +23,12 @@ writes one categorical GRIB2 `PTYPE` field per member/forecast hour plus
 - `src/precip_type_diag/grid.py`: grid preparation and production diagnosis.
 - `src/precip_type_diag/gribio.py`: ecCodes definition setup, vertical
   truncation, and GRIB writing.
+- `src/precip_type_diag/monitoring.py`: machine-readable operational status and
+  alert evaluation from `summary.json`.
 - `src/precip_type_diag/operational.py`: FDB discovery, validation, retrieval,
   prefetching, member multiprocessing, and summaries.
+- `src/precip_type_diag/profile_samples.py`: FDB column-profile extraction for
+  scientific validation candidates and observation-backed gridpoints.
 - `src/precip_type_diag/definitions/`: local ecCodes overlay for `PTYPE`.
 - `test/`: pytest suite with synthetic and mocked orchestration tests.
 
@@ -34,8 +38,10 @@ GRIB fixture data.
 ## Commands
 
 ```bash
-python -m pip install -e ".[test]"
+python -m pip install -e ".[test,dev]"
 python -m py_compile src/precip_type_diag/*.py test/*.py
+python -m ruff check .
+python -m mypy
 PYTHONPATH=src python -m pytest -q
 PYTHONPATH=src python -m precip_type_diag.benchmark
 ```
@@ -64,7 +70,7 @@ uenv run --view=realtime fdb/5.18:v3 -- \
   --output-root /users/$USER/work/ptype-fdb
 ```
 
-No formatter, linter, type checker, or CI workflow is currently configured.
+Ruff, mypy, pytest coverage, and GitHub Actions checks are configured.
 
 ## Constraints
 
@@ -89,4 +95,6 @@ No formatter, linter, type checker, or CI workflow is currently configured.
   from `HHL`.
 - Prefetching is enabled by default; `--no-prefetch` is for debugging or timing
   comparison.
+- Runs write both `summary.json` and `monitoring.json`; critical monitoring
+  alerts make the CLI exit non-zero.
 - Output category codes are `0, 1, 3, 5, 8, 12, 13`.

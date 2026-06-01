@@ -40,6 +40,11 @@ def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None
             "4",
             "--summary-json",
             "/tmp/summary.json",
+            "--monitoring-json",
+            "/tmp/monitoring.json",
+            "--max-wall-s",
+            "900",
+            "--no-output-file-check",
             "--no-prefetch",
             "--skip-validation",
             "--precip-mask-threshold-mm",
@@ -64,6 +69,9 @@ def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None
             "precip_mask_threshold_mm": 0.25,
             "vertical_cutoff_m": 12000.0,
             "summary_json": Path("/tmp/summary.json"),
+            "monitoring_json": Path("/tmp/monitoring.json"),
+            "max_wall_s": 900.0,
+            "check_output_files": False,
         }
     ]
     assert json.loads(capsys.readouterr().out) == {"failed": {}, "ok": True}
@@ -90,7 +98,13 @@ def test_cli_requires_date_and_time_together(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_cli_returns_failure_when_any_member_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("precip_type_diag.__main__.run_operational", lambda **kwargs: {"failed": {"001": "boom"}})
+    monkeypatch.setattr(
+        "precip_type_diag.__main__.run_operational",
+        lambda **kwargs: {
+            "failed": {"001": "boom"},
+            "monitoring": {"recommended_exit_code": 1},
+        },
+    )
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -103,3 +117,23 @@ def test_cli_returns_failure_when_any_member_fails(monkeypatch: pytest.MonkeyPat
     )
 
     assert main() == 1
+
+
+def test_cli_rejects_non_positive_monitoring_wall_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "precip_type_diag",
+            "--model",
+            "ICON-CH2-EPS",
+            "--output-root",
+            str(tmp_path),
+            "--max-wall-s",
+            "0",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 2

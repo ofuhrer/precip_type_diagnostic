@@ -8,7 +8,6 @@ pytest.importorskip("numba")
 from precip_type_diag.numba_backend import diagnose_column_categorical_numba
 from precip_type_diag.profile import ThermodynamicColumn, diagnose_column_from_thermodynamics
 
-
 H5 = np.array([4000.0, 3000.0, 2000.0, 1000.0, 0.0])
 H7 = np.array([6000.0, 5000.0, 4000.0, 3000.0, 2000.0, 1000.0, 0.0])
 H8 = np.array([7000.0, 6000.0, 5000.0, 4000.0, 3000.0, 2000.0, 1000.0, 0.0])

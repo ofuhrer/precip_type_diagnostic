@@ -1,0 +1,36 @@
+usage: __main__.py [-h] --model {ICON-CH1-EPS,ICON-CH2-EPS} --output-root
+                   OUTPUT_ROOT [--members MEMBERS] [--date DATE]
+                   [--time TIME_VALUE] [--max-step MAX_STEP]
+                   [--lookback-days LOOKBACK_DAYS] [--chunk-size CHUNK_SIZE]
+                   [--workers WORKERS] [--summary-json SUMMARY_JSON]
+                   [--monitoring-json MONITORING_JSON]
+                   [--max-wall-s MAX_WALL_S] [--no-output-file-check]
+                   [--no-prefetch] [--skip-validation]
+                   [--precip-mask-threshold-mm PRECIP_MASK_THRESHOLD_MM]
+                   [--vertical-cutoff-m VERTICAL_CUTOFF_M]
+
+ICON FDB precipitation-type diagnostic
+
+options:
+  -h, --help            show this help message and exit
+  --model {ICON-CH1-EPS,ICON-CH2-EPS}
+  --output-root OUTPUT_ROOT
+  --members MEMBERS     Use 'all' or a comma-separated list like 000,001
+  --date DATE           FDB run date YYYYMMDD. Default: discover latest
+                        complete run.
+  --time TIME_VALUE     FDB run time HHMM. Default: discover latest complete
+                        run.
+  --max-step MAX_STEP
+  --lookback-days LOOKBACK_DAYS
+  --chunk-size CHUNK_SIZE
+  --workers WORKERS
+  --summary-json SUMMARY_JSON
+  --monitoring-json MONITORING_JSON
+  --max-wall-s MAX_WALL_S
+                        Fail monitoring if run wall time exceeds this limit
+  --no-output-file-check
+                        Skip post-run checks for expected output GRIB files
+  --no-prefetch         Disable chunk prefetching
+  --skip-validation     Skip FDB completeness validation
+  --precip-mask-threshold-mm PRECIP_MASK_THRESHOLD_MM
+  --vertical-cutoff-m VERTICAL_CUTOFF_M

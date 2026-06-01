@@ -1,0 +1,30 @@
+{
+  "host": "balfrin-ln003",
+  "output_root": "/users/olifu/work/ptype-codex-smoke/output",
+  "py_path": "/user-environment/venvs/fdb/lib/python3.11/site-packages:/users/olifu/work/ptype-codex-smoke/precip_type_diagnostic/src",
+  "python": "Python 3.11.6",
+  "repo_path": "/users/olifu/work/ptype-codex-smoke/precip_type_diagnostic",
+  "uenv_image": "fdb/5.18:v3",
+  "versions": {
+    "earthkit.data": {
+      "file": "/user-environment/venvs/fdb/lib/python3.11/site-packages/earthkit/data/__init__.py",
+      "version": "0.18.3"
+    },
+    "eccodes": {
+      "file": "/user-environment/venvs/fdb/lib/python3.11/site-packages/eccodes/__init__.py",
+      "version": "2.39.2"
+    },
+    "numba": {
+      "file": "/users/olifu/work/ptype-codex-smoke/.venv-fdb-smoke/lib/python3.11/site-packages/numba/__init__.py",
+      "version": "0.65.1"
+    },
+    "numpy": {
+      "file": "/user-environment/venvs/fdb/lib/python3.11/site-packages/numpy/__init__.py",
+      "version": "1.26.4"
+    },
+    "precip_type_diag": {
+      "file": "/users/olifu/work/ptype-codex-smoke/precip_type_diagnostic/src/precip_type_diag/__init__.py",
+      "version": "unknown"
+    }
+  }
+}

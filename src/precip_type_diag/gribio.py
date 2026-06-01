@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
-from pathlib import Path
 import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 
 import eccodes
 import numpy as np
 from earthkit.data.encoders.grib import GribEncoder
 
 from .constants import PrecipitationTypeCode
-
 
 ALLOWED_OUTPUT_CODES = frozenset(int(code) for code in PrecipitationTypeCode)
 
@@ -41,7 +40,7 @@ def _candidate_meteoswiss_definition_dirs() -> list[Path]:
         candidates.append(Path(env_dir))
 
     try:
-        import eccodes_cosmo_resources  # type: ignore
+        import eccodes_cosmo_resources
 
         get_path = getattr(eccodes_cosmo_resources, "get_definitions_path", None)
         if callable(get_path):
