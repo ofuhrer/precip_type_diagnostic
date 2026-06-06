@@ -8,12 +8,15 @@ import pytest
 
 from precip_type_diag.constants import INPUT_PARAM_IDS
 from precip_type_diag.operational import (
+    FdbChunk,
     FdbRun,
+    Timings,
     _fields_by_step,
     _has_complete_param,
     _member_keys,
     _ml_fields_by_step,
     _parse_step,
+    _process_chunk,
     _step_expr,
     _step_token,
     config_for_model,
@@ -76,6 +79,147 @@ def test_field_grouping_uses_metadata_step_and_param() -> None:
     assert len(ml[1]["T"]) == 2
     assert len(ml[2]["P"]) == 1
     assert sorted(by_step) == [1]
+
+
+def test_process_chunk_uses_previous_total_precip_for_first_step(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured_total_precip: list[np.ndarray] = []
+
+    class Quality:
+        def as_dict(self):
+            return {
+                "total_columns": 2,
+                "active_columns": 1,
+                "invalid_total_precip_columns": 0,
+                "invalid_ground_temperature_columns": 0,
+                "invalid_profile_columns": 0,
+                "invalid_active_ground_temperature_columns": 0,
+                "invalid_active_profile_columns": 0,
+            }
+
+    class Result:
+        categorical = np.array([1, 0], dtype=np.int32)
+        quality = Quality()
+
+    def fake_diagnose(inputs, *, precip_mask_threshold_mm: float):
+        captured_total_precip.append(inputs.total_precip_mm.copy())
+        return Result()
+
+    monkeypatch.setattr("precip_type_diag.operational.diagnose_grid_categorical_with_quality", fake_diagnose)
+    monkeypatch.setattr("precip_type_diag.operational.write_output_grib", lambda *args, **kwargs: None)
+
+    chunk = FdbChunk(
+        steps=[1],
+        ml_by_step={
+            1: {
+                "T": [FakeField({"level": 1}, np.array([273.0, 274.0]))],
+                "P": [FakeField({"level": 1}, np.array([90000.0, 90000.0]))],
+                "QV": [FakeField({"level": 1}, np.array([0.002, 0.002]))],
+            }
+        },
+        total_precip_by_step={1: FakeField({}, np.array([3.0, 5.0]))},
+        ground_temperature_by_step={1: FakeField({}, np.array([273.15, 274.15]))},
+        request_s=0.0,
+    )
+    run = FdbRun(
+        date="20260531",
+        time="1800",
+        model="icon-ch1-eps",
+        member="000",
+        type="cf",
+        number=None,
+        max_step=1,
+    )
+
+    _process_chunk(
+        chunk,
+        timings=Timings(),
+        retained_full_levels=1,
+        half_level_height_m=np.array([[1000.0, 1000.0], [0.0, 0.0]]),
+        previous_total_precip=np.array([2.0, 5.0]),
+        output_root=tmp_path,
+        run=run,
+        output_model="ICON-CH1-EPS",
+        precip_mask_threshold_mm=0.0,
+    )
+
+    np.testing.assert_allclose(captured_total_precip[0], np.array([1.0, 0.0]))
+
+
+def test_process_chunk_writes_member_sidecar_when_probability_products_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    sidecar_calls: list[dict[str, object]] = []
+
+    class Quality:
+        def as_dict(self):
+            return {
+                "total_columns": 2,
+                "active_columns": 1,
+                "invalid_total_precip_columns": 0,
+                "invalid_ground_temperature_columns": 0,
+                "invalid_profile_columns": 0,
+                "invalid_active_ground_temperature_columns": 0,
+                "invalid_active_profile_columns": 0,
+            }
+
+    class Result:
+        categorical = np.array([1, 0], dtype=np.int32)
+        probabilities = {
+            "prob_rain_mm": np.array([75.0, 0.0]),
+            "prob_snow_mm": np.array([0.0, 0.0]),
+            "prob_ice_pellets_mm": np.array([0.0, 0.0]),
+            "prob_freezing_drizzle_mm": np.array([0.0, 0.0]),
+            "prob_freezing_rain_on_ground_mm": np.array([0.0, 0.0]),
+            "prob_freezing_rain_mm": np.array([0.0, 0.0]),
+        }
+        quality = Quality()
+
+    monkeypatch.setattr("precip_type_diag.operational.diagnose_grid_probabilities_with_quality", lambda *args, **kwargs: Result())
+    monkeypatch.setattr("precip_type_diag.operational.write_output_grib", lambda *args, **kwargs: None)
+
+    def fake_write_sidecar(path, **kwargs):
+        sidecar_calls.append({"path": path, **kwargs})
+
+    monkeypatch.setattr("precip_type_diag.operational.write_member_diagnostic_netcdf", fake_write_sidecar)
+
+    chunk = FdbChunk(
+        steps=[1],
+        ml_by_step={
+            1: {
+                "T": [FakeField({"level": 1}, np.array([273.0, 274.0]))],
+                "P": [FakeField({"level": 1}, np.array([90000.0, 90000.0]))],
+                "QV": [FakeField({"level": 1}, np.array([0.002, 0.002]))],
+            }
+        },
+        total_precip_by_step={1: FakeField({}, np.array([3.0, 5.0]))},
+        ground_temperature_by_step={1: FakeField({}, np.array([273.15, 274.15]))},
+        request_s=0.0,
+    )
+    run = FdbRun(
+        date="20260531",
+        time="1800",
+        model="icon-ch1-eps",
+        member="000",
+        type="cf",
+        number=None,
+        max_step=1,
+    )
+
+    _, written, sidecars_written, *_ = _process_chunk(
+        chunk,
+        timings=Timings(),
+        retained_full_levels=1,
+        half_level_height_m=np.array([[1000.0, 1000.0], [0.0, 0.0]]),
+        previous_total_precip=np.array([2.0, 5.0]),
+        output_root=tmp_path,
+        run=run,
+        output_model="ICON-CH1-EPS",
+        precip_mask_threshold_mm=0.0,
+        write_probability_products=True,
+    )
+
+    assert written == 1
+    assert sidecars_written == 1
+    assert sidecar_calls[0]["path"] == tmp_path / "ICON-CH1-EPS" / "20260531" / "1800" / "000" / "lfff00010000.ptype_diag.nc"
+    np.testing.assert_allclose(sidecar_calls[0]["hourly_precip_mm"], np.array([1.0, 0.0]))
 
 
 def test_has_complete_param_checks_steps_levels_and_timespan(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,6 +332,7 @@ def test_run_operational_writes_summary_for_fixed_fdb_run(
         members=("000", "001"),
         date="20260531",
         time_value="1800",
+        start_step=0,
         max_step=1,
         output_root=tmp_path,
         workers=1,
@@ -203,10 +348,74 @@ def test_run_operational_writes_summary_for_fixed_fdb_run(
     assert summary["processed_members"] == ["000", "001"]
     assert summary["timings_s"]["request_s"] == 4.0
     assert summary["data_quality"]["total_columns"] == 0
+    assert summary["probabilistic_products"]["enabled"] is False
+    assert summary["probabilistic_products"]["status"] == "skipped"
     assert summary["provenance"] == {"git": {"commit": "abc"}}
     assert [run.member for run in processed] == ["000", "001"]
     assert "starting operational run model=ICON-CH1-EPS" in caplog.text
     assert "finished operational run model=ICON-CH1-EPS processed=2 failed=0" in caplog.text
+
+
+def test_run_operational_can_generate_probability_products(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    probability_calls: list[dict[str, object]] = []
+
+    def fake_process_member(**kwargs):
+        return {
+            "run": {"member": kwargs["member"]},
+            "steps": 1,
+            "written": 1,
+            "diagnostic_sidecars_written": 1,
+            "timings_s": {},
+            "wall_s": 0.1,
+        }
+
+    def fake_generate_probability_products(**kwargs):
+        probability_calls.append(kwargs)
+        return {
+            "enabled": True,
+            "status": "ok",
+            "format": "netcdf",
+            "scale": "percent_0_100",
+            "products": ["prob_rain_mm_ens", "valid_member_count"],
+            "files_written": 1,
+            "output_dir": str(tmp_path / "ICON-CH1-EPS" / "20260531" / "1800" / "probabilities"),
+            "required_members": ["000", "001"],
+            "valid_members": ["000", "001"],
+            "missing_members": [],
+        }
+
+    monkeypatch.setattr("precip_type_diag.operational._configure_meteoswiss_definitions", lambda: None)
+    monkeypatch.setattr("precip_type_diag.operational._warm_diagnostic", lambda: None)
+    monkeypatch.setattr("precip_type_diag.operational._process_member", fake_process_member)
+    monkeypatch.setattr("precip_type_diag.operational.generate_probability_products", fake_generate_probability_products)
+
+    summary = run_operational(
+        model="ICON-CH1-EPS",
+        members=("000", "001"),
+        date="20260531",
+        time_value="1800",
+        start_step=0,
+        max_step=0,
+        output_root=tmp_path,
+        workers=1,
+        write_probability_products=True,
+    )
+
+    assert summary["probabilistic_products"]["status"] == "ok"
+    assert summary["monitoring"]["ok"] is True
+    assert probability_calls == [
+        {
+            "output_root": tmp_path,
+            "model": "ICON-CH1-EPS",
+            "date": "20260531",
+            "time_value": "1800",
+            "members": ("000", "001"),
+            "processed_members": ("000", "001"),
+            "failed_members": (),
+            "start_step": 0,
+            "max_step": 0,
+        }
+    ]
 
 
 def test_run_operational_discovers_latest_complete_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -257,6 +466,7 @@ def test_run_operational_records_member_failures(monkeypatch: pytest.MonkeyPatch
         members=("000", "001"),
         date="20260531",
         time_value="1800",
+        start_step=0,
         max_step=0,
         output_root=tmp_path,
         workers=1,

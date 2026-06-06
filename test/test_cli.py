@@ -30,6 +30,8 @@ def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None
             "20260531",
             "--time",
             "1800",
+            "--start-step",
+            "1",
             "--max-step",
             "3",
             "--lookback-days",
@@ -45,6 +47,7 @@ def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None
             "--max-wall-s",
             "900",
             "--no-output-file-check",
+            "--write-probability-products",
             "--no-prefetch",
             "--skip-input-checks",
             "--precip-mask-threshold-mm",
@@ -60,6 +63,7 @@ def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None
             "members": ("000", "001"),
             "date": "20260531",
             "time_value": "1800",
+            "start_step": 1,
             "max_step": 3,
             "lookback_days": 1,
             "chunk_size": 2,
@@ -72,6 +76,7 @@ def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None
             "monitoring_json": Path("/tmp/monitoring.json"),
             "max_wall_s": 900.0,
             "check_output_files": False,
+            "write_probability_products": True,
         }
     ]
     assert json.loads(capsys.readouterr().out) == {"failed": {}, "ok": True}

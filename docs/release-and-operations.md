@@ -38,7 +38,7 @@ Before tagging a release:
    ```
 
    The tested `fdb/5.18:v3` setup uses a uenv-created `.venv-fdb` for `numba`
-   while keeping the FDB site-packages first on `PYTHONPATH`.
+   and `netCDF4` while keeping the FDB site-packages first on `PYTHONPATH`.
 
 4. Re-read at least one smoke-test output GRIB and check `PTYPE` metadata and
    allowed category codes.
@@ -85,9 +85,10 @@ with the release record. If the FDB image changes, rerun smoke tests before
 promotion.
 
 For `fdb/5.18:v3`, create `.venv-fdb` inside the uenv with
-`--system-site-packages`, install `numba`, then install this package with
-`--no-deps`. This preserves the FDB uenv Earthkit, ecCodes, and NumPy packages
-while adding the diagnostic's accelerated backend dependency.
+`--system-site-packages`, install `numba` and `netCDF4`, then install this
+package with `--no-deps`. This preserves the FDB uenv Earthkit, ecCodes, and
+NumPy packages while adding the diagnostic's accelerated backend and NetCDF
+dependencies.
 
 ## Monitoring
 
@@ -101,10 +102,13 @@ Every run writes:
 
 - non-empty `summary.json["failed"]`;
 - requested members with no processed or failed result;
-- processed members whose step count or written GRIB count is not `max_step + 1`;
+- processed members whose step count or written GRIB count is not
+  `max_step - start_step + 1`;
 - non-zero fatal data-quality counters for precipitation or active columns;
 - wall-clock runtime above `--max-wall-s`, when configured;
 - missing expected output GRIB files, unless `--no-output-file-check` is used.
+- failed requested probability-product generation, when
+  `--write-probability-products` is used.
 
 The CLI exits with `monitoring.json["recommended_exit_code"]`, so any critical
 monitoring alert produces a non-zero process exit. Use `--monitoring-json` to

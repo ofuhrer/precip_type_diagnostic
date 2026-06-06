@@ -78,3 +78,23 @@ def test_monitoring_status_can_check_output_files(tmp_path: Path) -> None:
     assert status["ok"] is False
     assert status["observed"]["missing_output_files"] == 1
     assert status["alerts"][0]["code"] == "missing_output_files"
+
+
+def test_monitoring_status_reports_requested_probability_failure(tmp_path: Path) -> None:
+    summary = _summary(tmp_path)
+    summary["probabilistic_products"] = {
+        "enabled": True,
+        "status": "failed",
+        "missing_members": ["001"],
+        "error": "failed members: 001",
+    }
+
+    status = build_monitoring_status(summary)
+
+    assert status["ok"] is False
+    assert status["alerts"][0]["code"] == "probability_products_failed"
+    assert status["alerts"][0]["details"] == {
+        "status": "failed",
+        "error": "failed members: 001",
+        "missing_members": ["001"],
+    }

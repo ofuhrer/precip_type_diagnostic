@@ -34,11 +34,12 @@ def _missing_output_files(summary: dict[str, Any]) -> list[str]:
     model = str(summary["model"])
     date = str(summary["date"])
     time_value = str(summary["time"])
+    start_step = int(summary.get("start_step", 0))
     max_step = int(summary["max_step"])
     missing: list[str] = []
 
     for member in summary.get("processed_members", []):
-        for step in range(max_step + 1):
+        for step in range(start_step, max_step + 1):
             path = output_root / model / date / time_value / str(member) / f"lfff{_step_token(step)}.ptype.grib2"
             if not path.exists():
                 missing.append(str(path))
@@ -59,7 +60,8 @@ def build_monitoring_status(
     failed = summary.get("failed", {})
     failed_members = sorted(str(member) for member in failed) if isinstance(failed, dict) else []
     max_step = int(summary.get("max_step", -1))
-    expected_steps = max_step + 1
+    start_step = int(summary.get("start_step", 0))
+    expected_steps = max_step - start_step + 1
 
     if failed_members:
         alerts.append(
@@ -128,6 +130,25 @@ def build_monitoring_status(
                 details={"wall_s": round(wall_s, 3), "max_wall_s": round(float(max_wall_s), 3)},
             )
         )
+
+    probability_products = summary.get("probabilistic_products", {})
+    if isinstance(probability_products, dict) and probability_products.get("enabled") is True:
+        probability_status = str(probability_products.get("status", ""))
+        if probability_status != "ok":
+            probability_details: dict[str, object] = {"status": probability_status}
+            error = probability_products.get("error")
+            if error:
+                probability_details["error"] = str(error)
+            missing_members = probability_products.get("missing_members")
+            if missing_members:
+                probability_details["missing_members"] = missing_members
+            alerts.append(
+                _alert(
+                    "probability_products_failed",
+                    "Requested ensemble probability products were not generated successfully.",
+                    details=probability_details,
+                )
+            )
 
     missing_files: list[str] = []
     if check_output_files and processed_members:

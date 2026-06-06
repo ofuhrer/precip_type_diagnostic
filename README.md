@@ -5,7 +5,8 @@ Categorical precipitation-type diagnostic for MeteoSwiss `ICON-CH1-EPS` and
 
 The production path reads the required model fields from realtime FDB on
 Balfrin and writes one categorical GRIB2 `PTYPE` field per member and forecast
-hour, plus a `summary.json`.
+hour, plus `summary.json` and `monitoring.json`. Optional probability products
+write member diagnostic sidecars and final ensemble products as NetCDF.
 
 This repository intentionally contains only the FDB production path. There is
 no file-based input mode and no bundled GRIB fixture data.
@@ -95,7 +96,7 @@ runtime pieces into `.venv-fdb` so those uenv packages are not replaced:
 uenv run --view=realtime fdb/5.18:v3 -- bash -lc '
   python -m venv --system-site-packages .venv-fdb
   .venv-fdb/bin/python -m pip install --upgrade pip setuptools wheel
-  .venv-fdb/bin/python -m pip install "numba>=0.65,<0.66"
+  .venv-fdb/bin/python -m pip install "numba>=0.65,<0.66" "netCDF4>=1.7,<1.8"
   .venv-fdb/bin/python -m pip install --no-deps -e .
 '
 ```
@@ -174,6 +175,8 @@ Prefetching is enabled by default. Disable it only for debugging or comparison:
 Useful CLI options:
 
 - `--members all` or `--members 000,001`
+- `--start-step N` to choose the first diagnosed lead time; default is `1`
+  because step 0 has no preceding hourly precipitation interval
 - `--max-step N` to limit lead times for smoke tests
 - `--workers N` for member-level process parallelism
 - `--chunk-size N` for forecast-hour retrieval chunks
@@ -183,6 +186,8 @@ Useful CLI options:
 - `--max-wall-s N` to make monitoring fail if wall-clock runtime exceeds `N`
   seconds
 - `--no-output-file-check` to skip post-run existence checks for expected GRIBs
+- `--write-probability-products` to also write member diagnostic NetCDF sidecars
+  and strict all-member ensemble probability NetCDF products
 - `--skip-input-checks` to skip FDB completeness checks
 - `--precip-mask-threshold-mm X` to require at least `X` mm/h before diagnosing
 
@@ -196,6 +201,20 @@ The default output layout is:
 <output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/monitoring.json
 ```
 
+With `--write-probability-products`, the run also writes:
+
+```text
+<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/<member>/lfffDDHHMMSS.ptype_diag.nc
+<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/probabilities/lfffDDHHMMSS.ptype_prob.nc
+```
+
+The member sidecar NetCDF files contain `ptype`, `hourly_precip_mm`,
+microphysics-consistent per-type probabilities in percent, and thresholded
+hourly-precipitation fields using a 30% probability threshold and 0.01 mm/h
+precipitation mask. Final probability NetCDF files contain ensemble means of
+those fields, categorical `PTYPE` ensemble frequencies in percent, valid member
+count, and ensemble mean hourly precipitation.
+
 `summary.json` records:
 
 - selected model, run date/time, members, worker count, chunk size, prefetch mode
@@ -208,17 +227,20 @@ The default output layout is:
   branch, dirty-worktree flag, and command-line arguments when available
 - monitoring status and alerts
 - aggregate timing fields for FDB requests, decode, diagnosis, and writing
+- probability-product status, format, thresholds, product names, and output
+  directory
 
 `monitoring.json` is a compact status file for batch schedulers and dashboards.
 It reports `status`, `ok`, `recommended_exit_code`, and critical alerts for
 failed members, missing member results, incomplete member output counts,
 fatal active-column data-quality counters, exceeded `--max-wall-s`, and missing
-expected output GRIB files. The CLI returns the monitoring
+expected output GRIB files. Requested probability-product failures are also
+critical when `--write-probability-products` is used. The CLI returns the monitoring
 `recommended_exit_code`, so critical monitoring alerts result in a non-zero
 process exit.
 
-For a successful full `ICON-CH2-EPS` run, expect `21 * 121 = 2541` GRIB output
-files. A measured full CH2 run on Balfrin with `--workers 4` and default
+For a successful default full `ICON-CH2-EPS` run, expect `21 * 120 = 2520` GRIB
+output files. A measured full CH2 run on Balfrin with `--workers 4` and default
 prefetching took about 16 minutes wall-clock.
 
 ## Troubleshooting

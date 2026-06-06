@@ -25,8 +25,9 @@ import numpy as np
 
 from .constants import DEFAULT_VERTICAL_CUTOFF_M, INPUT_PARAM_IDS
 from .gribio import check_precip_mask_threshold_mm, derive_vertical_level_selection, write_output_grib
-from .grid import GridInputs, diagnose_grid_categorical, diagnose_grid_categorical_with_quality
+from .grid import GridInputs, diagnose_grid_categorical, diagnose_grid_categorical_with_quality, diagnose_grid_probabilities_with_quality
 from .monitoring import build_monitoring_status
+from .probabilities import disabled_probability_summary, generate_probability_products, write_member_diagnostic_netcdf
 from .provenance import collect_runtime_provenance
 
 LOGGER = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ class OperationalConfig:
     output_root: Path
     precip_mask_threshold_mm: float
     vertical_cutoff_m: float = DEFAULT_VERTICAL_CUTOFF_M
+    start_step: int = 1
     max_step: int = 0
     max_workers: int = 4
     chunk_size: int = 2
@@ -127,6 +129,7 @@ class MemberProcessKwargs(TypedDict):
     member: str
     date: str
     time_value: str
+    start_step: int
     max_step: int
     output_root: Path
     chunk_size: int
@@ -134,6 +137,7 @@ class MemberProcessKwargs(TypedDict):
     check_inputs: bool
     precip_mask_threshold_mm: float
     vertical_cutoff_m: float
+    write_probability_products: bool
 
 
 def config_for_model(
@@ -143,6 +147,7 @@ def config_for_model(
     output_root: Path | None = None,
     precip_mask_threshold_mm: float | None = None,
     vertical_cutoff_m: float = DEFAULT_VERTICAL_CUTOFF_M,
+    start_step: int = 1,
     max_step: int | None = None,
     workers: int | None = None,
     chunk_size: int = 2,
@@ -155,6 +160,10 @@ def config_for_model(
     effective_max_step = MODEL_MAX_STEP[model] if max_step is None else max_step
     if effective_max_step < 0:
         raise ValueError(f"max_step must be non-negative, got {effective_max_step}")
+    if start_step < 0:
+        raise ValueError(f"start_step must be non-negative, got {start_step}")
+    if start_step > effective_max_step:
+        raise ValueError(f"start_step must be <= max_step, got start_step={start_step} max_step={effective_max_step}")
     if chunk_size <= 0:
         raise ValueError(f"chunk_size must be positive, got {chunk_size}")
     effective_workers = 4 if workers is None else workers
@@ -176,6 +185,7 @@ def config_for_model(
         output_root=Path(output_root) if output_root is not None else DEFAULT_OUTPUT_ROOT,
         precip_mask_threshold_mm=threshold,
         vertical_cutoff_m=float(vertical_cutoff_m),
+        start_step=int(start_step),
         max_step=effective_max_step,
         max_workers=effective_workers,
         chunk_size=chunk_size,
@@ -324,8 +334,9 @@ def _has_complete_param(
     return True
 
 
-def _check_complete_run(model: str, member: str, date: str, time_value: str, max_step: int) -> None:
-    expected_steps = set(range(max_step + 1))
+def _check_complete_run(model: str, member: str, date: str, time_value: str, max_step: int, start_step: int = 1) -> None:
+    diagnostic_steps = set(range(start_step, max_step + 1))
+    total_precip_steps = set(range(max(0, start_step - 1), max_step + 1))
     expected_full_levels = set(range(1, FULL_LEVELS + 1))
     expected_half_levels = set(range(1, HALF_LEVELS + 1))
     checks = [
@@ -353,7 +364,7 @@ def _check_complete_run(model: str, member: str, date: str, time_value: str, max
                 param=INPUT_PARAM_IDS["TOT_PREC"],
                 levtype="sfc",
                 timespan="fs",
-                expected_steps=expected_steps,
+                expected_steps=total_precip_steps,
             ),
         ),
         (
@@ -366,7 +377,7 @@ def _check_complete_run(model: str, member: str, date: str, time_value: str, max
                 param=INPUT_PARAM_IDS["T_G"],
                 levtype="sfc",
                 timespan="none",
-                expected_steps=expected_steps,
+                expected_steps=diagnostic_steps,
             ),
         ),
     ]
@@ -382,7 +393,7 @@ def _check_complete_run(model: str, member: str, date: str, time_value: str, max
                     param=param,
                     levtype="ml",
                     timespan="none",
-                    expected_steps=expected_steps,
+                    expected_steps=diagnostic_steps,
                     expected_levels=expected_full_levels,
                 ),
             )
@@ -399,6 +410,7 @@ def discover_complete_run(
     *,
     model: str,
     member: str,
+    start_step: int,
     max_step: int,
     lookback_days: int,
 ) -> FdbRun:
@@ -421,7 +433,7 @@ def discover_complete_run(
 
     for date, time_value in sorted(candidates, reverse=True):
         try:
-            _check_complete_run(model, member, date, time_value, max_step)
+            _check_complete_run(model, member, date, time_value, max_step, start_step=start_step)
         except RuntimeError:
             continue
         type_value, number = _member_keys(member)
@@ -538,6 +550,25 @@ def _fetch_hhl(run: FdbRun, timings: Timings) -> np.ndarray:
     return hhl
 
 
+def _fetch_total_precip_step(run: FdbRun, *, step: int, timings: Timings) -> np.ndarray:
+    request = {
+        **_base_request(run),
+        "param": INPUT_PARAM_IDS["TOT_PREC"],
+        "levtype": "sfc",
+        "step": str(step),
+        "timespan": "fs",
+    }
+    fieldlist, request_s = _request_fieldlist(request)
+    timings.static_request_s += request_s
+    fields = list(fieldlist)
+    if len(fields) != 1:
+        raise RuntimeError(f"Expected one TOT_PREC field for initialization step {step}, got {len(fields)}")
+    start = time.perf_counter()
+    values = fields[0].to_numpy(flatten=False)
+    timings.static_decode_s += time.perf_counter() - start
+    return values
+
+
 def _fetch_chunk(
     run: FdbRun,
     *,
@@ -604,8 +635,10 @@ def _process_chunk(
     run: FdbRun,
     output_model: str,
     precip_mask_threshold_mm: float,
-) -> tuple[np.ndarray | None, int, int, int, dict[str, int]]:
+    write_probability_products: bool = False,
+) -> tuple[np.ndarray | None, int, int, int, int, dict[str, int]]:
     written = 0
+    sidecars_written = 0
     active_columns = 0
     total_columns = 0
     data_quality = {key: 0 for key in DATA_QUALITY_KEYS}
@@ -627,13 +660,24 @@ def _process_chunk(
         timings.decode_s += time.perf_counter() - decode_start
 
         diagnose_start = time.perf_counter()
-        result = diagnose_grid_categorical_with_quality(
-            inputs,
-            precip_mask_threshold_mm=precip_mask_threshold_mm,
-        )
-        categorical = result.categorical
+        if write_probability_products:
+            diagnostic_result = diagnose_grid_probabilities_with_quality(
+                inputs,
+                precip_mask_threshold_mm=precip_mask_threshold_mm,
+            )
+            categorical = diagnostic_result.categorical
+            quality_report = diagnostic_result.quality
+            probabilities = diagnostic_result.probabilities
+        else:
+            categorical_result = diagnose_grid_categorical_with_quality(
+                inputs,
+                precip_mask_threshold_mm=precip_mask_threshold_mm,
+            )
+            categorical = categorical_result.categorical
+            quality_report = categorical_result.quality
+            probabilities = None
         timings.diagnose_s += time.perf_counter() - diagnose_start
-        quality = result.quality.as_dict()
+        quality = quality_report.as_dict()
         for key in DATA_QUALITY_KEYS:
             data_quality[key] += int(quality.get(key, 0))
         active_columns += int(quality["active_columns"])
@@ -642,10 +686,28 @@ def _process_chunk(
         write_start = time.perf_counter()
         destination = output_root / output_model / run.date / run.time / run.member / f"lfff{_step_token(step)}.ptype.grib2"
         write_output_grib(chunk.total_precip_by_step[step], categorical, destination, expected_shape=tuple(categorical.shape))
+        if write_probability_products:
+            if probabilities is None:
+                raise RuntimeError("diagnostic probabilities were not computed")
+            sidecar_destination = output_root / output_model / run.date / run.time / run.member / f"lfff{_step_token(step)}.ptype_diag.nc"
+            write_member_diagnostic_netcdf(
+                sidecar_destination,
+                ptype=categorical,
+                hourly_precip_mm=total_precip_mm,
+                probabilities=probabilities,
+                attrs={
+                    "model": output_model,
+                    "date": run.date,
+                    "time": run.time,
+                    "member": run.member,
+                    "step": step,
+                },
+            )
+            sidecars_written += 1
         timings.write_s += time.perf_counter() - write_start
         written += 1
         previous_total_precip = total_precip_current
-    return previous_total_precip, written, active_columns, total_columns, data_quality
+    return previous_total_precip, written, sidecars_written, active_columns, total_columns, data_quality
 
 
 def process_member_run(
@@ -658,6 +720,8 @@ def process_member_run(
     check_inputs: bool,
     precip_mask_threshold_mm: float,
     vertical_cutoff_m: float,
+    start_step: int,
+    write_probability_products: bool = False,
 ) -> dict[str, object]:
     _configure_meteoswiss_definitions()
     _warm_diagnostic()
@@ -672,16 +736,19 @@ def process_member_run(
         prefetch,
     )
     if check_inputs:
-        _check_complete_run(output_model, run.member, run.date, run.time, run.max_step)
+        _check_complete_run(output_model, run.member, run.date, run.time, run.max_step, start_step=start_step)
 
     timings = Timings(discovery_s=run.discovery_s)
     wall_start = time.perf_counter()
     full_hhl = _fetch_hhl(run, timings)
     selection = derive_vertical_level_selection(full_hhl, vertical_cutoff_m)
     half_level_height_m = full_hhl[selection.half_level_start :]
-    step_chunks = _chunk_steps(list(range(run.max_step + 1)), chunk_size)
-    previous_total_precip: np.ndarray | None = None
+    step_chunks = _chunk_steps(list(range(start_step, run.max_step + 1)), chunk_size)
+    previous_total_precip: np.ndarray | None = (
+        None if start_step == 0 else _fetch_total_precip_step(run, step=start_step - 1, timings=timings)
+    )
     written = 0
+    sidecars_written = 0
     active_columns = 0
     total_columns = 0
     data_quality = {key: 0 for key in DATA_QUALITY_KEYS}
@@ -689,7 +756,7 @@ def process_member_run(
     if not prefetch:
         for steps in step_chunks:
             chunk = _fetch_chunk(run, steps=steps, full_level_start=selection.full_level_start, timings=timings)
-            previous_total_precip, chunk_written, chunk_active, chunk_total, chunk_quality = _process_chunk(
+            previous_total_precip, chunk_written, chunk_sidecars, chunk_active, chunk_total, chunk_quality = _process_chunk(
                 chunk,
                 timings=timings,
                 retained_full_levels=selection.retained_full_levels,
@@ -699,8 +766,10 @@ def process_member_run(
                 run=run,
                 output_model=output_model,
                 precip_mask_threshold_mm=precip_mask_threshold_mm,
+                write_probability_products=write_probability_products,
             )
             written += chunk_written
+            sidecars_written += chunk_sidecars
             active_columns += chunk_active
             total_columns += chunk_total
             for key in DATA_QUALITY_KEYS:
@@ -725,7 +794,7 @@ def process_member_run(
                         steps=step_chunks[index + 1],
                         full_level_start=selection.full_level_start,
                     )
-                previous_total_precip, chunk_written, chunk_active, chunk_total, chunk_quality = _process_chunk(
+                previous_total_precip, chunk_written, chunk_sidecars, chunk_active, chunk_total, chunk_quality = _process_chunk(
                     chunk,
                     timings=timings,
                     retained_full_levels=selection.retained_full_levels,
@@ -735,8 +804,10 @@ def process_member_run(
                     run=run,
                     output_model=output_model,
                     precip_mask_threshold_mm=precip_mask_threshold_mm,
+                    write_probability_products=write_probability_products,
                 )
                 written += chunk_written
+                sidecars_written += chunk_sidecars
                 active_columns += chunk_active
                 total_columns += chunk_total
                 for key in DATA_QUALITY_KEYS:
@@ -763,8 +834,10 @@ def process_member_run(
         },
         "chunk_size": chunk_size,
         "prefetch": prefetch,
+        "start_step": start_step,
         "steps": sum(len(chunk) for chunk in step_chunks),
         "written": written,
+        "diagnostic_sidecars_written": sidecars_written,
         "retained_full_levels": selection.retained_full_levels,
         "active_columns": active_columns,
         "total_columns": total_columns,
@@ -780,6 +853,7 @@ def _process_member(
     member: str,
     date: str,
     time_value: str,
+    start_step: int,
     max_step: int,
     output_root: Path,
     chunk_size: int,
@@ -787,6 +861,7 @@ def _process_member(
     check_inputs: bool,
     precip_mask_threshold_mm: float,
     vertical_cutoff_m: float,
+    write_probability_products: bool = False,
 ) -> dict[str, object]:
     return process_member_run(
         run=_make_run(model, member, date, time_value, max_step),
@@ -797,6 +872,8 @@ def _process_member(
         check_inputs=check_inputs,
         precip_mask_threshold_mm=precip_mask_threshold_mm,
         vertical_cutoff_m=vertical_cutoff_m,
+        start_step=start_step,
+        write_probability_products=write_probability_products,
     )
 
 
@@ -852,6 +929,7 @@ def run_operational(
     members: tuple[str, ...] | None = None,
     date: str | None = None,
     time_value: str | None = None,
+    start_step: int = 1,
     max_step: int | None = None,
     lookback_days: int = 2,
     chunk_size: int = 2,
@@ -864,6 +942,7 @@ def run_operational(
     monitoring_json: Path | None = None,
     max_wall_s: float | None = None,
     check_output_files: bool = False,
+    write_probability_products: bool = False,
 ) -> dict[str, object]:
     if (date is None) != (time_value is None):
         raise ValueError("date and time_value must be provided together")
@@ -877,6 +956,7 @@ def run_operational(
         output_root=output_root,
         precip_mask_threshold_mm=precip_mask_threshold_mm,
         vertical_cutoff_m=vertical_cutoff_m,
+        start_step=start_step,
         max_step=max_step,
         workers=workers,
         chunk_size=chunk_size,
@@ -891,6 +971,7 @@ def run_operational(
         discovered = discover_complete_run(
             model=model,
             member=discovery_member,
+            start_step=config.start_step,
             max_step=config.max_step,
             lookback_days=lookback_days,
         )
@@ -909,6 +990,7 @@ def run_operational(
             "member": member,
             "date": date,
             "time_value": time_value,
+            "start_step": config.start_step,
             "max_step": config.max_step,
             "output_root": config.output_root,
             "chunk_size": config.chunk_size,
@@ -916,6 +998,7 @@ def run_operational(
             "check_inputs": check_inputs,
             "precip_mask_threshold_mm": config.precip_mask_threshold_mm,
             "vertical_cutoff_m": config.vertical_cutoff_m,
+            "write_probability_products": write_probability_products,
         }
         for member in config.members
     }
@@ -939,14 +1022,36 @@ def run_operational(
                     LOGGER.exception("member=%s failed", member)
 
     ordered_results = {member: results[member] for member in config.members if member in results}
+    processed_members = tuple(ordered_results)
+    if write_probability_products:
+        probability_summary = generate_probability_products(
+            output_root=config.output_root,
+            model=model,
+            date=str(date),
+            time_value=str(time_value),
+            members=config.members,
+            processed_members=processed_members,
+            failed_members=tuple(sorted(failed)),
+            max_step=config.max_step,
+            start_step=config.start_step,
+        )
+    else:
+        probability_summary = disabled_probability_summary(
+            config.output_root,
+            model,
+            str(date),
+            str(time_value),
+            config.members,
+        )
     summary: dict[str, object] = {
         "model": model,
         "fdb_model": MODEL_TO_FDB[model],
         "date": date,
         "time": time_value,
         "members": list(config.members),
-        "processed_members": list(ordered_results),
+        "processed_members": list(processed_members),
         "failed": failed,
+        "start_step": config.start_step,
         "max_step": config.max_step,
         "chunk_size": config.chunk_size,
         "prefetch": config.prefetch,
@@ -955,6 +1060,7 @@ def run_operational(
         "discovery_s": round(discovery_s, 3),
         "timings_s": _merge_timings(ordered_results.values()),
         "data_quality": _merge_data_quality(ordered_results.values()),
+        "probabilistic_products": probability_summary,
         "provenance": collect_runtime_provenance(),
         "wall_s": round(time.perf_counter() - start, 3),
         "per_member": ordered_results,

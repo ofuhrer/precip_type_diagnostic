@@ -8,8 +8,11 @@ ICON ensemble member and forecast hour for:
 - `ICON-CH1-EPS`
 - `ICON-CH2-EPS`
 
-The package does not produce ensemble probabilities, bias correction, station
-postprocessing, or alternative diagnostics.
+By default the package writes only categorical member `PTYPE` GRIB2 outputs.
+With `--write-probability-products`, it also writes member diagnostic NetCDF
+sidecars and strict all-member ensemble probability NetCDF products. It does not
+produce plotting, bias correction, station postprocessing, or alternative
+diagnostics.
 
 ## Scientific Method
 
@@ -46,7 +49,17 @@ Hourly precipitation is diagnosed as:
 TOT_PREC(current step) - TOT_PREC(previous step)
 ```
 
-At step 0, the accumulated `TOT_PREC` field is used directly.
+By default production starts at step 1 because step 0 has no preceding hourly
+forecast interval. `TOT_PREC(step 0)` is fetched only to initialize the first
+hourly delta:
+
+```text
+TOT_PREC(step 1) - TOT_PREC(step 0)
+```
+
+The CLI still accepts `--start-step 0` for debugging or compatibility, but that
+output should be treated as a step-0 placeholder rather than a physically
+well-defined hourly precipitation-type diagnostic.
 
 ## Column Algorithm
 
@@ -59,8 +72,9 @@ For each active column:
 3. Identify precipitating and sublimating layers.
 4. Estimate ice probability from the precipitation-generation layer.
 5. Compute melting and refreezing energies from the wet-bulb profile.
-6. Convert the resulting probabilities to one categorical code using the fixed
-   priority order in `constants.py`.
+6. Convert the resulting probabilities to one categorical code by selecting the
+   highest-probability type, using the fixed priority order in `constants.py`
+   only for ties.
 
 The production grid path in `grid.py` uses the same logic through the numba
 backend for speed. Dry columns, defined by
@@ -104,6 +118,8 @@ FDB discovery and completeness checks
   -> decode arrays
   -> diagnose categorical PTYPE
   -> write one GRIB per member/step
+  -> optionally write member NetCDF diagnostic sidecars
+  -> optionally aggregate strict all-member NetCDF probability products
   -> write summary.json
 ```
 
@@ -122,6 +138,13 @@ Important implementation details:
   template, preserving grid geometry and run/member/step metadata while replacing
   parameter metadata and values. It checks output shape, finite integer
   category values, and the allowed `PTYPE` code set before writing.
+- With `--write-probability-products`, member workers also write one NetCDF
+  sidecar per member/step containing `PTYPE`, hourly precipitation, and
+  Firdewsa-style microphysics-consistent per-type probabilities in percent. The
+  probability module then writes one final NetCDF per step under `probabilities/`
+  with ensemble probability means, thresholded precipitation overlays,
+  categorical `PTYPE` frequencies, valid member count, and mean hourly
+  precipitation.
 - `summary.json` includes runtime provenance: Python/platform metadata,
   dependency versions, Git commit, branch, dirty-worktree state, and command-line
   arguments when available.
@@ -134,6 +157,7 @@ Important implementation details:
 | CH2 members | `000..020` |
 | CH1 max step | `33` |
 | CH2 max step | `120` |
+| start step | `1` |
 | worker count | `4` unless overridden |
 | chunk size | `2` forecast hours |
 | prefetch | enabled |
@@ -150,6 +174,8 @@ The test suite has three layers:
 
 - `test_profile.py` and `test_numba_backend.py`: science/algorithm parity checks.
 - `test_grid.py`: grid data-quality behavior for dry and active columns.
+- `test_probabilities.py`: NetCDF sidecar, aggregation, and strict completeness
+  checks.
 - `test_operational.py` and `test_cli.py`: mocked FDB orchestration and CLI
   behavior.
 

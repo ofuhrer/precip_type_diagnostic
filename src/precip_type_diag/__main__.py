@@ -17,6 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--members", default="all", help="Use 'all' or a comma-separated list like 000,001")
     parser.add_argument("--date", default=None, help="FDB run date YYYYMMDD. Default: discover latest complete run.")
     parser.add_argument("--time", dest="time_value", default=None, help="FDB run time HHMM. Default: discover latest complete run.")
+    parser.add_argument("--start-step", type=int, default=1, help="First forecast step to diagnose. Default: 1 because step 0 has no previous hourly precipitation interval.")
     parser.add_argument("--max-step", type=int, default=None)
     parser.add_argument("--lookback-days", type=int, default=2)
     parser.add_argument("--chunk-size", type=int, default=2)
@@ -25,6 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--monitoring-json", type=Path, default=None)
     parser.add_argument("--max-wall-s", type=float, default=None, help="Fail monitoring if run wall time exceeds this limit")
     parser.add_argument("--no-output-file-check", action="store_true", help="Skip post-run checks for expected output GRIB files")
+    parser.add_argument(
+        "--write-probability-products",
+        action="store_true",
+        help="Write member diagnostic NetCDF sidecars and strict all-member ensemble probability NetCDF products",
+    )
     parser.add_argument("--no-prefetch", action="store_true", help="Disable chunk prefetching")
     parser.add_argument("--skip-input-checks", action="store_true", help="Skip FDB completeness checks")
     parser.add_argument("--precip-mask-threshold-mm", type=float, default=None)
@@ -40,6 +46,11 @@ def main() -> int:
         parser.error("--date and --time must be provided together")
     if args.max_step is not None and args.max_step < 0:
         parser.error(f"--max-step must be non-negative, got {args.max_step}")
+    if args.start_step < 0:
+        parser.error(f"--start-step must be non-negative, got {args.start_step}")
+    effective_max_step = MODEL_MAX_STEP[args.model] if args.max_step is None else args.max_step
+    if args.start_step > effective_max_step:
+        parser.error(f"--start-step must be <= --max-step, got start_step={args.start_step} max_step={effective_max_step}")
     if args.chunk_size <= 0:
         parser.error(f"--chunk-size must be positive, got {args.chunk_size}")
     if args.workers is not None and args.workers <= 0:
@@ -58,7 +69,8 @@ def main() -> int:
         members=members,
         date=args.date,
         time_value=args.time_value,
-        max_step=MODEL_MAX_STEP[args.model] if args.max_step is None else args.max_step,
+        start_step=args.start_step,
+        max_step=effective_max_step,
         lookback_days=args.lookback_days,
         chunk_size=args.chunk_size,
         workers=args.workers,
@@ -70,6 +82,7 @@ def main() -> int:
         monitoring_json=args.monitoring_json,
         max_wall_s=args.max_wall_s,
         check_output_files=not args.no_output_file_check,
+        write_probability_products=args.write_probability_products,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
     monitoring = summary.get("monitoring", {})

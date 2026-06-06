@@ -45,6 +45,8 @@ def _as_1d(array: np.ndarray | Iterable[float], name: str) -> np.ndarray:
 
 
 def _clip_probability(value: float) -> float:
+    if not np.isfinite(value):
+        return 0.0
     return float(np.clip(value, 0.0, 100.0))
 
 
@@ -60,6 +62,12 @@ def _prob_ice_from_temperature(min_temperature_c: float) -> float:
         - 449.6 * min_temperature_c
         - 1308.0
     )
+
+
+def _ice_pellet_ice_probability(refreezing_energy: float, melting_energy: float) -> float:
+    if melting_energy <= -1.0:
+        return 0.0
+    return _clip_probability(2.3 * refreezing_energy - 42.0 * np.log(melting_energy + 1.0) + 3.0)
 
 
 def calc_full_level_height_from_hhl(hhl_m: np.ndarray | Iterable[float]) -> np.ndarray:
@@ -226,6 +234,8 @@ def _prob_ice(
     ]
 
     if not precip_layers:
+        if relaxed_precip_layers and layers:
+            return _prob_ice_from_temperature(layers[0].minimum_temperature_c), True
         return 0.0, False
 
     valid_layers = [
@@ -351,7 +361,7 @@ def _areas_to_probabilities(
                 fzra_ice *= 0.2 * melting_energy
             freezing_rain = _clip_probability((100.0 - prob_ice) + (prob_ice / 100.0) * _clip_probability(fzra_ice))
 
-            ice_pellet_ice = _clip_probability(2.3 * refreezing_energy - 42.0 * np.log(melting_energy + 1.0) + 3.0)
+            ice_pellet_ice = _ice_pellet_ice_probability(refreezing_energy, melting_energy)
             ice_pellets = _clip_probability((prob_ice / 100.0) * ice_pellet_ice)
             rain = 0.0
             freezing_rain_on_ground = 0.0
@@ -363,7 +373,7 @@ def _areas_to_probabilities(
         snow_ice = _clip_probability(1540.0 * np.exp(-0.28 * melting_energy))
         snow = _clip_probability((prob_ice / 100.0) * snow_ice)
 
-        ice_pellet_ice = _clip_probability(2.3 * refreezing_energy - 42.0 * np.log(melting_energy + 1.0) + 3.0)
+        ice_pellet_ice = _ice_pellet_ice_probability(refreezing_energy, melting_energy)
         ice_pellets = _clip_probability((prob_ice / 100.0) * ice_pellet_ice)
 
         fzra_ice = -2.1 * refreezing_energy + 0.2 * melting_energy + 458.0
@@ -380,7 +390,7 @@ def _areas_to_probabilities(
         total_melting_energy = upper_melting_energy + surface_melting_energy
         refreezing_energy = abs(energies[1])
 
-        ice_pellet_ice = _clip_probability(2.3 * refreezing_energy - 42.0 * np.log(upper_melting_energy + 1.0) + 3.0)
+        ice_pellet_ice = _ice_pellet_ice_probability(refreezing_energy, upper_melting_energy)
         ice_pellets = _clip_probability((prob_ice / 100.0) * ice_pellet_ice)
 
         rain_ice = -2.1 * refreezing_energy + 0.2 * upper_melting_energy + 458.0

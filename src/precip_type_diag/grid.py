@@ -6,7 +6,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .numba_backend import diagnose_grid_categorical_numba_kernel
+from .constants import PROBABILITY_TYPE_FIELDS
+from .numba_backend import diagnose_grid_categorical_numba_kernel, diagnose_grid_probabilities_numba_kernel
 from .profile import (
     ColumnDiagnostics,
     ThermodynamicColumn,
@@ -54,6 +55,13 @@ class GridQualityReport:
 @dataclass(frozen=True)
 class GridCategoricalResult:
     categorical: np.ndarray
+    quality: GridQualityReport
+
+
+@dataclass(frozen=True)
+class GridDiagnosticResult:
+    categorical: np.ndarray
+    probabilities: dict[str, np.ndarray]
     quality: GridQualityReport
 
 
@@ -277,3 +285,72 @@ def diagnose_grid_categorical_with_quality(
         )
 
     return GridCategoricalResult(categorical=categorical.reshape(flat_shape), quality=quality)
+
+
+def diagnose_grid_probabilities_with_quality(
+    inputs: GridInputs,
+    *,
+    chunk_size: int = 4096,
+    precip_mask_threshold_mm: float = 0.0,
+) -> GridDiagnosticResult:
+    """Diagnose categorical classes and microphysics-consistent probabilities."""
+
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+    (
+        flat_shape,
+        temperature_2d,
+        pressure_2d,
+        humidity_2d,
+        full_level_height_m,
+        precip_flat,
+        ground_flat,
+    ) = _prepare_grid(inputs)
+
+    quality, active_mask = _quality_report(
+        temperature_2d,
+        pressure_2d,
+        humidity_2d,
+        full_level_height_m,
+        precip_flat,
+        ground_flat,
+        precip_mask_threshold_mm,
+    )
+    profile_finite = _finite_profile_columns(temperature_2d, pressure_2d, humidity_2d, full_level_height_m)
+    _raise_for_bad_active_data(quality, active_mask, ground_flat, profile_finite)
+
+    active = np.flatnonzero(active_mask)
+    categorical = np.zeros(precip_flat.size, dtype=np.int32)
+    probability_stack = np.zeros((len(PROBABILITY_TYPE_FIELDS), precip_flat.size), dtype=np.float64)
+    if active.size == 0:
+        return GridDiagnosticResult(
+            categorical=categorical.reshape(flat_shape),
+            probabilities={f"prob_{name}_mm": probability_stack[index].reshape(flat_shape) for index, (name, _) in enumerate(PROBABILITY_TYPE_FIELDS)},
+            quality=quality,
+        )
+
+    for start in range(0, active.size, chunk_size):
+        stop = min(start + chunk_size, active.size)
+        indices = active[start:stop]
+        thermodynamics = calculate_thermodynamics(
+            temperature_2d[:, indices],
+            humidity_2d[:, indices],
+            pressure_2d[:, indices],
+        )
+        chunk_categorical, chunk_probabilities = diagnose_grid_probabilities_numba_kernel(
+            thermodynamics.temperature_c,
+            thermodynamics.wet_bulb_c,
+            thermodynamics.relative_humidity_ice_pct,
+            full_level_height_m[:, indices],
+            precip_flat[indices],
+            ground_flat[indices],
+            precip_mask_threshold_mm,
+        )
+        categorical[indices] = chunk_categorical
+        probability_stack[:, indices] = chunk_probabilities
+
+    return GridDiagnosticResult(
+        categorical=categorical.reshape(flat_shape),
+        probabilities={f"prob_{name}_mm": probability_stack[index].reshape(flat_shape) for index, (name, _) in enumerate(PROBABILITY_TYPE_FIELDS)},
+        quality=quality,
+    )

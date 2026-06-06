@@ -9,6 +9,7 @@ from pathlib import Path
 
 import eccodes
 import numpy as np
+from earthkit.data import from_source
 from earthkit.data.encoders.grib import GribEncoder
 
 from .constants import PrecipitationTypeCode
@@ -20,6 +21,12 @@ ALLOWED_OUTPUT_CODES = frozenset(int(code) for code in PrecipitationTypeCode)
 class GribTemplateMessage:
     message_bytes: bytes
     values_shape: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class GribFieldMessage:
+    values: np.ndarray
+    template: GribTemplateMessage
 
 
 @dataclass(frozen=True)
@@ -216,3 +223,44 @@ def write_output_grib(
             temp_path.unlink()
         raise
     return destination
+
+
+def read_single_grib_message(path: Path) -> GribFieldMessage:
+    """Read one GRIB message and retain its raw bytes as an output template."""
+
+    bootstrap_eccodes_definitions()
+    message_bytes: bytes | None = None
+    with path.open("rb") as handle:
+        message_id = eccodes.codes_grib_new_from_file(handle)
+        if message_id is None:
+            raise ValueError(f"{path} does not contain a GRIB message")
+        try:
+            message_bytes = eccodes.codes_get_message(message_id)
+        finally:
+            eccodes.codes_release(message_id)
+
+        extra_message_id = eccodes.codes_grib_new_from_file(handle)
+        if extra_message_id is not None:
+            try:
+                raise ValueError(f"{path} contains more than one GRIB message")
+            finally:
+                eccodes.codes_release(extra_message_id)
+
+    fields = list(from_source("file", str(path)))
+    if len(fields) != 1:
+        raise ValueError(f"{path} contains {len(fields)} GRIB fields; expected one")
+    values = np.asarray(fields[0].to_numpy(flatten=False))
+    return GribFieldMessage(
+        values=values,
+        template=GribTemplateMessage(
+            message_bytes=message_bytes,
+            values_shape=tuple(values.shape),
+        ),
+    )
+
+
+def read_categorical_grib(path: Path) -> GribFieldMessage:
+    field = read_single_grib_message(path)
+    categorical = _check_categorical_codes(field.values, tuple(field.values.shape))
+    return GribFieldMessage(values=categorical, template=field.template)
+
