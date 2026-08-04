@@ -31,3 +31,9 @@ jobs:
 
       - name: Test
         run: PYTHONPATH=src python -m pytest -q
+
+      - name: Benchmark
+        run: PYTHONPATH=src python -m precip_type_diag.benchmark
+
+      - name: Verify dependencies
+        run: python -m pip check

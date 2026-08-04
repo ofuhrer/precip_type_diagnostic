@@ -8,7 +8,8 @@ source code is licensed under the BSD 3-Clause License in `LICENSE`.
 
 ## Scientific Method Sources
 
-- Firdewsa Zukanovic MSc thesis: `background/Zukanovic_2023_MScThesis.pdf`
+- Firdewsa Zukanovic MSc thesis:
+  [local PDF](../background/Zukanovic_2023_MScThesis.pdf)
 - MeteoSwiss-APN thesis prototype:
   <https://github.com/MeteoSwiss-APN/precip_diagnostic>
 - Bourgouin, P. (2000): *A Method to Determine Precipitation Types*,
@@ -24,6 +25,16 @@ They are not package data and are not imported by the runtime. Their copyright
 and redistribution permissions belong to their original publishers or authors.
 Confirm redistribution rights before publishing release archives, wheels,
 containers, or public mirrors that include `background/`.
+
+The bundled documents are:
+
+- [Zukanovic MSc thesis](../background/Zukanovic_2023_MScThesis.pdf)
+- [Bourgouin (2000)](../background/Bourgouin_2000_WeatherAndForecasting.pdf)
+- [Birk et al. (2021)](../background/BirkEtAl_2021_WeatherAndForecasting.pdf)
+- [Benjamin et al. (2016)](../background/BenjaminEtAl_2016_WeatherAndForecasting.pdf)
+
+The scientific method sources above are the authoritative citations for this
+implementation.
 
 ## ecCodes Definitions
 

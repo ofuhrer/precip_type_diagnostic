@@ -34,7 +34,8 @@ coverage threshold.
 
 ## Balfrin Smoke Tests
 
-Run one smoke test for each operational model:
+Run the smoke test once for each operational model. This loop keeps the output
+directories separate:
 
 If the smoke test is submitted through SLURM, use the generally open `pp-short`
 partition and keep the requested wall time below one hour. Do not use restricted
@@ -42,14 +43,16 @@ elevated-rights partitions such as `pp-production`, `pp-prodntc`, or
 `pp-dispntc` for release-candidate smoke tests.
 
 ```bash
-uenv run --view=realtime fdb/5.18:v3 -- \
-  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-  .venv-fdb/bin/python -m precip_type_diag \
-  --model ICON-CH2-EPS \
-  --members 000 \
-  --max-step 1 \
-  --max-wall-s 900 \
-  --output-root /users/$USER/work/ptype-fdb-smoke
+for model in ICON-CH1-EPS ICON-CH2-EPS; do
+  uenv run --view=realtime fdb/5.18:v3 -- \
+    env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
+    .venv-fdb/bin/python -m precip_type_diag \
+      --model "$model" \
+      --members 000 \
+      --max-step 1 \
+      --max-wall-s 900 \
+      --output-root "/users/$USER/work/ptype-fdb-smoke/$model"
+done
 ```
 
 Record:
@@ -72,6 +75,9 @@ Run one explicit-cycle smoke with the wrapper used by DEPL:
 ```bash
 tools/run_depl_cycle.sh ICON-CH2-EPS YYYYMMDD HH /users/$USER/work/ptype-fdb-depl-smoke --members 000 --max-step 1
 ```
+
+The final two options deliberately override the wrapper's all-member,
+full-forecast defaults to keep this smoke test small.
 
 If submitted through SLURM, use the generally open `pp-short` partition unless
 the expected runtime requires a longer generally open queue.

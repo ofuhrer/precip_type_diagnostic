@@ -1,48 +1,52 @@
 # precip_type_diag
 
-Categorical precipitation-type diagnostic for MeteoSwiss `ICON-CH1-EPS` and
-`ICON-CH2-EPS`.
+`precip_type_diag` diagnoses the precipitation type at the surface for the
+MeteoSwiss `ICON-CH1-EPS` and `ICON-CH2-EPS` ensemble models.
 
-The production path reads the required model fields from realtime FDB on
-Balfrin and writes one categorical `PTYPE` field per member and forecast hour,
-plus `summary.json` and `monitoring.json`. GRIB2 is the default member output
-format; NetCDF can be selected explicitly and is required for optional
-probability products.
+For each requested ensemble member and forecast hour, it reads model fields
+from MeteoSwiss FDB and writes one categorical `PTYPE` field. Every run also
+writes a human- and machine-readable summary, monitoring status, and a final
+run marker.
 
-This repository intentionally contains only the FDB production path. There is
-no file-based input mode and no bundled GRIB fixture data.
+The project is intentionally narrow:
 
-## References
+- production input comes only from the realtime FDB on Balfrin;
+- member output is GRIB2 by default and can be NetCDF;
+- optional NetCDF probability products are aggregated across every requested
+  member;
+- plotting, station postprocessing, and file-based input are out of scope.
 
-The implementation follows Firdewsa Zukanovic's MSc thesis method,
-*Precipitation Type Diagnostic for ICON*, which adapts the Modified Bourgouin
-precipitation-type approach for ICON.
+## Start Here
 
-Core external references:
+Choose the path that matches what you need:
 
-- Bourgouin, P. (2000): *A Method to Determine Precipitation Types*,
-  `Weather and Forecasting`, 15(5), 583-592.
-  https://doi.org/10.1175/1520-0434%282000%29015%3C0583%3AAMTDPT%3E2.0.CO%3B2
+| Goal | Start with |
+| --- | --- |
+| Understand or change the code | [Local development setup](#local-development-setup) |
+| Check that FDB access works | [First Balfrin smoke test](#first-balfrin-smoke-test) |
+| Run a production cycle | [Production runs](#production-runs) |
+| Understand the diagnostic | [Science and architecture](docs/science-and-architecture.md) |
+| Prepare or operate a release | [Release and operations](docs/release-and-operations.md) |
 
-- Birk, K., E. Lenning, K. Donofrio, and M. T. Friedlein (2021):
-  *A Revised Bourgouin Precipitation-Type Algorithm*,
-  `Weather and Forecasting`, 36(2), 425-438.
-  https://doi.org/10.1175/WAF-D-20-0118.1
+A local checkout can run all automated checks without FDB access. Running the
+diagnostic itself requires a Balfrin account, access to the realtime FDB, and
+the MeteoSwiss FDB `uenv`.
 
-- Code implemented during MSc thesis of Firdewsa
-  https://github.com/MeteoSwiss-APN/precip_diagnostic
+## Key Terms
 
-See [docs/science-and-architecture.md](docs/science-and-architecture.md) for
-the implemented method, input/output contracts, and operational design.
-See [docs/release-and-operations.md](docs/release-and-operations.md) for the
-release gate, provenance, monitoring, and rollback expectations.
-See [docs/provenance.md](docs/provenance.md) for licensing and source
-provenance notes, and [docs/release-checklist.md](docs/release-checklist.md) for
-the release-candidate checklist.
+- **FDB**: the forecast database that supplies the ICON model fields.
+- **Cycle**: one model initialization, identified by date and time, for example
+  `20260531/1800`.
+- **Member**: one ensemble realization. Member `000` is the control member.
+- **Forecast step**: lead time in hours from the model cycle. Production starts
+  at step 1 because hourly precipitation needs both the current and previous
+  accumulated-precipitation fields.
+- **Balfrin**: the MeteoSwiss system on which the realtime FDB environment is
+  available.
 
-## Fresh Clone Setup
+## Local Development Setup
 
-Use Python 3.11 or newer.
+Use Python 3.11 or newer:
 
 ```bash
 git clone git@github.com:ofuhrer/precip_type_diagnostic.git
@@ -51,22 +55,12 @@ cd precip_type_diagnostic
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install -e ".[test]"
-```
-
-Check the checkout:
-
-```bash
-python -m py_compile src/precip_type_diag/*.py test/*.py
-PYTHONPATH=src python -m pytest -q
-PYTHONPATH=src python -m precip_type_diag.benchmark
-```
-
-For handover or release-candidate checks, install the development extras and run
-the full maintenance gate:
-
-```bash
 python -m pip install -e ".[test,dev]"
+```
+
+Run the same maintenance checks used for handover and releases:
+
+```bash
 python -m py_compile src/precip_type_diag/*.py test/*.py
 python -m ruff check .
 python -m mypy
@@ -75,12 +69,12 @@ PYTHONPATH=src python -m precip_type_diag.benchmark
 python -m pip check
 ```
 
-Local checks do not require FDB access. Running the production diagnostic does
-require the Balfrin realtime FDB environment.
+None of these commands contacts FDB. The test suite uses synthetic data and
+mocked orchestration.
 
-## Balfrin Setup
+## Balfrin Runtime Setup
 
-Choose a working directory on Balfrin, then clone the repository:
+Clone the repository in a working directory on Balfrin:
 
 ```bash
 ssh balfrin
@@ -89,9 +83,9 @@ git clone git@github.com:ofuhrer/precip_type_diagnostic.git
 cd precip_type_diagnostic
 ```
 
-Create the runtime virtual environment with the realtime FDB uenv Python. The
-uenv provides FDB, Earthkit, ecCodes, and NumPy; install only the missing local
-runtime pieces into `.venv-fdb` so those uenv packages are not replaced:
+Create a virtual environment inside the realtime FDB `uenv`. The uenv supplies
+FDB, Earthkit, ecCodes, and NumPy; the commands below add the remaining runtime
+packages without replacing the uenv versions:
 
 ```bash
 uenv run --view=realtime fdb/5.18:v3 -- bash -lc '
@@ -102,44 +96,20 @@ uenv run --view=realtime fdb/5.18:v3 -- bash -lc '
 '
 ```
 
-Run production commands inside that uenv and prepend its Python site-packages to
-`PYTHONPATH`:
+Confirm that the CLI starts in the FDB environment:
 
 ```bash
-uenv image ls fdb
 uenv run --view=realtime fdb/5.18:v3 -- \
   env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
   .venv-fdb/bin/python -m precip_type_diag --help
 ```
 
-If the available FDB image changes, replace `fdb/5.18:v3` with the current
-realtime FDB image shown by `uenv image ls fdb`.
+If `fdb/5.18:v3` is no longer available, use `uenv image ls fdb` to find the
+current realtime image and record the selected version with the run.
 
-## Running
+## First Balfrin Smoke Test
 
-Production command for the latest complete `ICON-CH2-EPS` run:
-
-```bash
-uenv run --view=realtime fdb/5.18:v3 -- \
-  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-  .venv-fdb/bin/python -m precip_type_diag \
-  --model ICON-CH2-EPS \
-  --members all \
-  --output-root /users/$USER/work/ptype-fdb
-```
-
-Production command for `ICON-CH1-EPS`:
-
-```bash
-uenv run --view=realtime fdb/5.18:v3 -- \
-  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-  .venv-fdb/bin/python -m precip_type_diag \
-  --model ICON-CH1-EPS \
-  --members all \
-  --output-root /users/$USER/work/ptype-fdb
-```
-
-Small smoke test:
+Start with one member and one forecast hour:
 
 ```bash
 uenv run --view=realtime fdb/5.18:v3 -- \
@@ -151,20 +121,49 @@ uenv run --view=realtime fdb/5.18:v3 -- \
   --output-root /users/$USER/work/ptype-fdb-smoke
 ```
 
-DEPL-style production runs should pass an explicit cycle from the upstream
-notification service and use the wrapper in `tools/`:
+The command discovers the latest complete cycle. It succeeds when it exits with
+code 0, `monitoring.json` contains `"ok": true`, and the run directory contains
+`DONE.json`. See [Understanding a run](#understanding-a-run) for the layout.
+
+## Production Runs
+
+### Latest complete cycle
+
+This example runs every `ICON-CH2-EPS` member and forecast hour and writes GRIB2:
+
+```bash
+uenv run --view=realtime fdb/5.18:v3 -- \
+  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
+  .venv-fdb/bin/python -m precip_type_diag \
+  --model ICON-CH2-EPS \
+  --members all \
+  --output-root /users/$USER/work/ptype-fdb
+```
+
+Use `--model ICON-CH1-EPS` for CH1. The defaults are 21 members and 120
+forecast hours for CH2, or 11 members and 33 forecast hours for CH1.
+
+### Explicit production cycle with probability products
+
+For scheduler- or DEPL-triggered runs, pass the cycle explicitly through the
+provided wrapper:
 
 ```bash
 tools/run_depl_cycle.sh ICON-CH2-EPS 20260531 18 /users/$USER/work/ptype-fdb
 ```
 
-The wrapper loads the realtime FDB uenv, uses all members, `--workers 8`,
-`--chunk-size 2`, `--output-format netcdf`, `--write-probability-products`,
-JSON INFO logs, and three bounded FDB retries. It does not submit to SLURM or
-choose a queue; schedule it from DEPL or `sbatch` on a generally open partition
-such as `pp-short` when the runtime fits below the queue limit.
+The wrapper accepts `HH` or `HHMM`, loads the realtime FDB uenv, and runs all
+members with the operational defaults: 8 workers, forecast-hour chunks of 2,
+NetCDF member output, probability products, JSON INFO logs, and three bounded
+FDB retries. Extra CLI arguments can be appended to the command.
 
-Run a fixed FDB cycle instead of discovering the latest complete cycle:
+The wrapper does not submit a job or select a SLURM partition. That remains the
+responsibility of DEPL or the calling scheduler. Guidance and an `sbatch`
+example are in [Release and operations](docs/release-and-operations.md).
+
+### Explicit cycle without the wrapper
+
+Use `--date YYYYMMDD` and `--time HHMM` together:
 
 ```bash
 uenv run --view=realtime fdb/5.18:v3 -- \
@@ -178,123 +177,90 @@ uenv run --view=realtime fdb/5.18:v3 -- \
   --output-root /users/$USER/work/ptype-fdb-fixed
 ```
 
-Prefetching is enabled by default. Disable it only for debugging or comparison:
+## Understanding a Run
 
-```bash
-... python -m precip_type_diag ... --no-prefetch
-```
-
-Useful CLI options:
-
-- `--members all` or `--members 000,001`
-- `--start-step N` to choose the first diagnosed lead time; default is `1`
-  because step 0 has no preceding hourly precipitation interval
-- `--max-step N` to limit lead times for smoke tests
-- `--workers N` for member-level process parallelism; default is `8`
-- `--chunk-size N` for forecast-hour retrieval chunks
-- `--summary-json /path/to/summary.json` for an extra summary copy
-- `--monitoring-json /path/to/monitoring.json` for an extra machine-readable
-  monitoring status copy
-- `--run-id`, `--event-id`, and `--attempt` to record production trigger
-  metadata in summaries and marker files
-- `--log-level`, `--log-format text|json`, and `--log-file` for operational
-  logging
-- `--fdb-retries`, `--fdb-retry-initial-s`, and `--fdb-retry-max-s` for bounded
-  retries of transient FDB list/retrieve/decode failures
-- `--max-wall-s N` to make monitoring fail if wall-clock runtime exceeds `N`
-  seconds
-- `--output-format grib2|netcdf`; default is `grib2`
-- `--no-output-file-check` to skip post-run existence checks for expected member
-  output files
-- `--write-probability-products` to write diagnostic member fields and strict
-  all-member ensemble probability NetCDF products; requires
-  `--output-format=netcdf`
-- `--skip-input-checks` to skip FDB completeness checks
-- `--precip-mask-threshold-mm X` to require at least `X` mm/h before diagnosing
-
-## Outputs
-
-The default GRIB2 output layout is:
+Outputs are grouped by model and cycle:
 
 ```text
-<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/<member>/lfffDDHHMMSS.ptype.grib2
-<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/summary.json
-<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/monitoring.json
-<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/DONE.json or FAILED.json
+<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/
+├── <member>/
+│   └── lfffDDHHMMSS.ptype.grib2  # or .ptype.nc
+├── probabilities/                # only when probability products are enabled
+│   └── lfffDDHHMMSS.ptype_prob.nc
+├── summary.json
+├── monitoring.json
+└── DONE.json                     # FAILED.json when monitoring is critical
 ```
 
-With `--output-format=netcdf`, the member output layout is:
+During processing, `RUNNING.json` is present instead of the final marker.
 
-```text
-<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/<member>/lfffDDHHMMSS.ptype.nc
-<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/summary.json
-<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/monitoring.json
-```
-
-With `--output-format=netcdf --write-probability-products`, the member NetCDF
-files include diagnostic variables and the run also writes:
-
-```text
-<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/probabilities/lfffDDHHMMSS.ptype_prob.nc
-```
+- `summary.json` contains the selected cycle and members, output counts,
+  failures, data-quality counters, timings, retry statistics, and runtime/Git
+  provenance.
+- `monitoring.json` is the scheduler contract. Its `ok`, `status`, alerts, and
+  `recommended_exit_code` fields summarize whether the run is usable.
+- The CLI exits non-zero when monitoring reports a critical condition.
 
 Member NetCDF files always contain `ptype`. When probability products are
-enabled they also contain `hourly_precip_mm`, microphysics-consistent per-type
-probabilities in percent, and thresholded hourly-precipitation fields using a
-30% probability threshold and 0.01 mm/h precipitation mask. Final probability
-NetCDF files contain ensemble means of those fields, categorical `PTYPE`
-ensemble frequencies in percent, valid member count, and ensemble mean hourly
-precipitation.
+enabled, they also contain hourly precipitation and per-type diagnostic
+probabilities. Final probability files contain ensemble means, categorical
+frequencies, valid-member count, and mean hourly precipitation. Probability
+values use a `0..100` percent scale.
 
-`summary.json` records:
+The categorical `PTYPE` codes are:
 
-- selected model, run date/time, members, worker count, chunk size, prefetch mode
-- failed members, if any
-- per-member output counts, active-column counts, retained vertical levels,
-  forecast-hour chunk counts, FDB request counts, and timing breakdowns
-- aggregate data-quality counters for non-finite precipitation, profile, and
-  ground-temperature values
-- runtime provenance: Python/platform metadata, dependency versions, Git commit,
-  branch, dirty-worktree flag, and command-line arguments when available
-- monitoring status and alerts
-- aggregate timing fields for FDB checks, static-field retrieval, dynamic FDB
-  requests split by field group, decode split by field group, diagnosis, and
-  writing
-- selected member output format
-- production run metadata: run id, event id, attempt, hostname, user, PID, and
-  SLURM job metadata when present
-- retry policy and retry counters for FDB operations
-- probability-product status, format, thresholds, product names, and output
-  directory; enabled probability runs also report preflight, NetCDF read,
-  aggregation, write, publish, and wall timings
+| Code | Meaning |
+| ---: | --- |
+| `0` | no precipitation |
+| `1` | rain |
+| `3` | freezing rain |
+| `5` | snow |
+| `8` | ice pellets |
+| `12` | freezing drizzle |
+| `13` | freezing rain on ground |
 
-`monitoring.json` is a compact status file for batch schedulers and dashboards.
-It reports `status`, `ok`, `recommended_exit_code`, and critical alerts for
-failed members, missing member results, incomplete member output counts,
-fatal active-column data-quality counters, exceeded `--max-wall-s`, and missing
-expected member output files. Requested probability-product failures are also
-critical when `--write-probability-products` is used. The CLI returns the monitoring
-`recommended_exit_code`, so critical monitoring alerts result in a non-zero
-process exit.
+## Common Options
 
-Runs also write atomic state markers in the run directory. `RUNNING.json` is
-created when member processing starts. It is replaced by `DONE.json` if
-monitoring is OK, or by `FAILED.json` if monitoring is critical. Reruns replace
-products, summaries, monitoring files, and markers atomically.
+Run `python -m precip_type_diag --help` for the complete CLI reference. The
+options most useful for first runs are:
 
-For a successful default full `ICON-CH2-EPS` run, expect `21 * 120 = 2520` GRIB
-output files. Two measured CH2 step-1-to-24 Balfrin runtime matrices found
-`--workers 8 --chunk-size 2` with default prefetching to be the fastest tested
-GRIB2 configuration.
+- `--members all` or `--members 000,001`
+- `--max-step N` to shorten a smoke test
+- `--workers N` to change member-level parallelism; default `8`
+- `--output-format grib2|netcdf`; default `grib2`
+- `--write-probability-products`; requires `--output-format netcdf`
+- `--max-wall-s N` to make an overlong run fail monitoring
+- `--log-format text|json` and `--log-file PATH`
+- `--no-prefetch` for debugging or performance comparison
+- `--skip-input-checks` only when deliberately bypassing FDB completeness checks
 
 ## Troubleshooting
 
-- `fdb-utils` or FDB source errors usually mean the command is not running inside
+- **`fdb-utils` or FDB source errors:** confirm the command is inside
   `uenv run --view=realtime fdb/...`.
-- If Python cannot import FDB/earthkit support from the uenv, check that
-  `PYTHONPATH` starts with
+- **Python cannot import FDB or Earthkit:** confirm `PYTHONPATH` begins with
   `/user-environment/venvs/fdb/lib/python3.11/site-packages:src`.
-- If ecCodes cannot resolve MeteoSwiss local parameters, run inside the FDB uenv
-  or set `PRECIP_TYPE_DIAG_COSMO_DEFS` to the MeteoSwiss definitions directory.
-- The package imports `eccodes` before `earthkit.data` in the FDB path because
-  this ordering is required in some Balfrin realtime FDB environments.
+- **ecCodes cannot resolve the local `PTYPE` parameter:** run inside the FDB
+  uenv, or set `PRECIP_TYPE_DIAG_COSMO_DEFS` to the MeteoSwiss definitions
+  directory.
+- **A run exits non-zero:** read `monitoring.json` first, then use
+  `summary.json["failed"]`, the alerts, and the run log to find the failing
+  member or stage.
+- **A rerun finds old probability files:** probability publication replaces the
+  run's complete `probabilities/` directory; a failed publication removes it.
+
+## Further Documentation
+
+- [Science and architecture](docs/science-and-architecture.md): method, input
+  fields, category contract, implementation, and test strategy.
+- [Release and operations](docs/release-and-operations.md): release gate,
+  deployment, monitoring, and rollback.
+- [Release checklist](docs/release-checklist.md): fill-in record for a release
+  candidate.
+- [Provenance and licensing](docs/provenance.md): scientific sources, bundled
+  references, ecCodes definitions, and redistribution considerations.
+
+The implementation follows Firdewsa Zukanovic's MSc thesis method based on the
+Modified Bourgouin algorithm. The principal references are Bourgouin (2000),
+Birk et al. (2021), and the
+[MeteoSwiss thesis prototype](https://github.com/MeteoSwiss-APN/precip_diagnostic).

@@ -1,11 +1,17 @@
 # Release and Operations
 
-This project is not production-accepted solely because tests pass. A release
-must be tied to a code revision, dependency environment, operational smoke-test
-record, and rollback plan.
+This guide is for the person preparing, deploying, or supporting an operational
+release. A release is ready only when four things are recorded together:
+
+1. the exact code revision;
+2. the Python and FDB dependency environment;
+3. successful automated checks and Balfrin smoke tests;
+4. an executable rollback plan.
 
 Use [release-checklist.md](release-checklist.md) as the release-candidate record
-template. Use [provenance.md](provenance.md) for source and licensing notes.
+template rather than collecting this evidence informally. Use
+[provenance.md](provenance.md) for source and licensing notes. Setup and first
+run instructions are in the [README](../README.md).
 
 ## Pre-Release Gate
 
@@ -36,6 +42,10 @@ Before tagging a release:
      --max-wall-s 900 \
      --output-root /users/$USER/work/ptype-fdb-smoke
    ```
+
+   The command shows CH2. Repeat it with `--model ICON-CH1-EPS` and a separate
+   output directory. The [release checklist](release-checklist.md) provides a
+   loop that runs both models.
 
    The tested `fdb/5.18:v3` setup uses a uenv-created `.venv-fdb` for `numba`
    and `netCDF4` while keeping the FDB site-packages first on `PYTHONPATH`.
@@ -144,9 +154,9 @@ Every run writes:
   `max_step - start_step + 1`;
 - non-zero fatal data-quality counters for precipitation or active columns;
 - wall-clock runtime above `--max-wall-s`, when configured;
-- missing expected member output files, unless `--no-output-file-check` is used.
+- missing expected member output files, unless `--no-output-file-check` is used;
 - failed requested probability-product generation, when
-  `--write-probability-products` is used.
+  `--write-probability-products` is used;
 - exhausted transient FDB retries.
 
 The CLI exits with `monitoring.json["recommended_exit_code"]`, so any critical

@@ -1,5 +1,13 @@
 # Science and Architecture
 
+This document explains why the diagnostic works as it does and how the
+production components fit together. For installation and first-run commands,
+start with the [README](../README.md).
+
+The shortest useful mental model is: retrieve one atmospheric column from FDB,
+derive its wet-bulb thermal structure, classify its surface precipitation type,
+and repeat that process for every grid point, member, and forecast hour.
+
 ## Scope
 
 `precip_type_diag` produces one categorical precipitation-type field per ICON
@@ -11,9 +19,10 @@ ensemble member and forecast hour for:
 By default the package writes categorical member `PTYPE` GRIB2 outputs. With
 `--output-format=netcdf`, it writes member `PTYPE` NetCDF outputs instead. With
 `--output-format=netcdf --write-probability-products`, those member NetCDF files
-also contain diagnostic fields and the run writes strict all-member ensemble
-probability NetCDF products. It does not produce plotting, bias correction,
-station postprocessing, or alternative diagnostics.
+also contain diagnostic fields and the run writes ensemble probability NetCDF
+products. Aggregation is strict: every member requested for the run must finish
+successfully. The package does not produce plotting, bias correction, station
+postprocessing, or alternative diagnostics.
 
 ## Scientific Method
 
@@ -29,7 +38,9 @@ The broader method lineage is:
 - Birk et al. (2021): revised/Modified Bourgouin method, including wet-bulb
   profile usage and ice-nucleation considerations.
 - Zukanovic MSc thesis: ICON/MeteoSwiss implementation choices mirrored by this
-  repository. See https://github.com/MeteoSwiss-APN/precip_diagnostic for code.
+  repository. See the
+  [MeteoSwiss thesis prototype](https://github.com/MeteoSwiss-APN/precip_diagnostic)
+  for code.
 
 ## Input Fields
 
@@ -119,7 +130,7 @@ FDB discovery and completeness checks
   -> decode arrays
   -> diagnose categorical PTYPE
   -> write one member output file per member/step
-  -> optionally aggregate strict all-member NetCDF probability products
+  -> optionally aggregate NetCDF probability products across all requested members
   -> write summary.json, monitoring.json, and run-state marker
 ```
 
@@ -183,7 +194,7 @@ changed without scientific review.
 
 ## Test Strategy
 
-The test suite has three layers:
+The test suite covers four areas:
 
 - `test_profile.py` and `test_numba_backend.py`: science/algorithm parity checks.
 - `test_grid.py`: grid data-quality behavior for dry and active columns.
@@ -210,8 +221,8 @@ Formal releases should rerun the smoke test from the annotated release tag.
 
 - Bourgouin, P. (2000): *A Method to Determine Precipitation Types*,
   `Weather and Forecasting`, 15(5), 583-592.
-  https://doi.org/10.1175/1520-0434%282000%29015%3C0583%3AAMTDPT%3E2.0.CO%3B2
+  [DOI](https://doi.org/10.1175/1520-0434%282000%29015%3C0583%3AAMTDPT%3E2.0.CO%3B2)
 - Birk, K., E. Lenning, K. Donofrio, and M. T. Friedlein (2021):
   *A Revised Bourgouin Precipitation-Type Algorithm*,
   `Weather and Forecasting`, 36(2), 425-438.
-  https://doi.org/10.1175/WAF-D-20-0118.1
+  [DOI](https://doi.org/10.1175/WAF-D-20-0118.1)
