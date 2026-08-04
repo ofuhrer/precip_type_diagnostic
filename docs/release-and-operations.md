@@ -110,6 +110,12 @@ run summary, and returns non-zero on critical monitoring. The manifest is the
 immutable campaign contract; create a new campaign directory to change dates,
 algorithm, output root, or missing-date policy.
 
+A verified 24-file Firdewsa day used about 55.1 MB and 157 seconds. The
+`20050101..20250831` calendar range projects to about 416 GB (`0.38 TiB`) of
+categorical GRIB2; require at least `0.5 TiB` plus the agreed retention margin
+before submitting the full array. Recalculate from a representative day when
+packing, grid, algorithm, or archive bounds change.
+
 Check progress cheaply, then verify all outputs before acceptance:
 
 ```bash

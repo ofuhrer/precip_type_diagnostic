@@ -85,6 +85,9 @@ default; `--allow-missing-dates` records and excludes them explicitly. The
 generated script uses `pp-long`, one daily cycle per array task, and a default
 concurrency of 8. Change planning options such as `--concurrency`,
 `--partition`, or `--wall-time` before submission when operations require it.
+The measured categorical output projects to roughly `0.38 TiB` for
+`20050101..20250831`; reserve at least `0.5 TiB` plus the local retention margin
+before launching the full archive.
 
 Check campaign state with:
 
