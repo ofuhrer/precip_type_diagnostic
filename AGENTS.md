@@ -2,9 +2,13 @@
 
 ## Mission
 
-`precip_type_diag` is the MeteoSwiss categorical precipitation-type diagnostic
+`precip_type_diag` is the MeteoSwiss dual-mode categorical precipitation-type diagnostic
 for `ICON-CH1-EPS` and `ICON-CH2-EPS`. It implements Firdewsa Zukanovic's MSc
 thesis method, based on the Modified Bourgouin algorithm.
+
+The default `firdewsa` mode preserves that implementation. The optional `icon`
+mode follows ICON commit `50da7c5924994f7626688eb5185b8e66c781b12e` as closely
+as the archived offline inputs allow.
 
 Production is FDB-only and runs on Balfrin. It writes one categorical `PTYPE`
 field per requested member and forecast hour, operational JSON, and a run-state
@@ -33,6 +37,9 @@ Additional references:
 - `profile.py`: authoritative pure-Python column algorithm.
 - `numba_backend.py`: accelerated categorical and microphysics-probability
   implementation; must remain behaviorally aligned with `profile.py`.
+- `icon_profile.py`: authoritative scalar reference for the ICON-adapted mode.
+- `icon_numba_backend.py`: accelerated ICON implementation; must remain aligned
+  with `icon_profile.py` and the pinned Fortran reference vectors.
 - `grid.py`: array preparation, active-column selection, and grid diagnosis.
 - `operational.py`: FDB discovery/checks/retrieval, retries, prefetching,
   multiprocessing, run markers, and summaries.
@@ -50,10 +57,11 @@ Additional references:
 
 - Keep scientific behavior thesis-faithful unless correcting a demonstrated
   bug. Do not tune constants or thresholds opportunistically.
-- Preserve category codes `0, 1, 3, 5, 8, 12, 13`, GRIB metadata, and the
+- Preserve category codes `0, 1, 3, 5, 6, 7, 8, 9, 10, 12, 13`, GRIB metadata, and the
   `summary.json` contract unless an explicit product decision changes them.
-- Treat `profile.py` as the scientific reference. Any optimized path change
-  requires focused reference-parity tests.
+- Treat `profile.py` as the Firdewsa reference and `icon_profile.py` as the ICON
+  reference. Any optimized path change requires focused reference-parity tests;
+  ICON science changes also require the executable Fortran harness.
 - Do not casually change `definitions/`, the 12 km `HHL` cutoff, probability
   thresholds, or precipitation masks; these require scientific and operational
   review.
@@ -66,6 +74,9 @@ Additional references:
 ## Operational Contract
 
 - Required FDB fields: `T`, `P`, `QV`, `HHL`, `TOT_PREC`, `T_G`.
+- ICON mode additionally requires archived `RAIN_GSP`, `SNOW_GSP`, and
+  `GRAU_GSP` accumulations. Unavailable convective rain/snow and hail rates must
+  remain explicit fidelity limitations rather than silent fallbacks.
 - Hourly precipitation is `TOT_PREC(current) - TOT_PREC(previous)`.
 - Default production starts at step 1; step 0 supplies only the first previous
   accumulated-precipitation field.

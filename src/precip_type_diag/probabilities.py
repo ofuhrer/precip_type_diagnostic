@@ -12,16 +12,37 @@ from pathlib import Path
 import numpy as np
 
 from .constants import (
+    ALGORITHM_FIRDEWSA,
     CATEGORICAL_PROBABILITY_CODES,
+    CATEGORICAL_PROBABILITY_CODES_BY_ALGORITHM,
     DEFAULT_INTENSITY_PRECIP_THRESHOLD_MM,
     DEFAULT_PROBABILITY_THRESHOLD_PERCENT,
     FINAL_PROBABILITY_VARIABLES,
     MEMBER_DIAGNOSTIC_VARIABLES,
     PROBABILITY_TYPE_FIELDS,
+    PrecipitationTypeCode,
 )
 from .netcdfio import read_netcdf, write_netcdf
 
 PROBABILITY_PRODUCT_NAMES = FINAL_PROBABILITY_VARIABLES
+
+
+def _categorical_codes(algorithm: str) -> tuple[PrecipitationTypeCode, ...]:
+    normalized = algorithm.lower()
+    try:
+        return CATEGORICAL_PROBABILITY_CODES_BY_ALGORITHM[normalized]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported diagnostic algorithm {algorithm!r}") from exc
+
+
+def probability_product_names(algorithm: str = ALGORITHM_FIRDEWSA) -> tuple[str, ...]:
+    return (
+        *(f"prob_{name}_mm_ens" for name, _ in PROBABILITY_TYPE_FIELDS),
+        *(f"precip_{name}_th_ens" for name, _ in PROBABILITY_TYPE_FIELDS),
+        *(f"ptype_probability_{int(code)}" for code in _categorical_codes(algorithm)),
+        "valid_member_count",
+        "hourly_precip_mean_mm",
+    )
 
 
 @dataclass(frozen=True)
@@ -80,7 +101,7 @@ def _validate_ptype(values: np.ndarray) -> np.ndarray:
     if not np.all(values == np.rint(values)):
         raise ValueError("ptype must contain integer category codes")
     categorical = values.astype(np.int32)
-    invalid_codes = sorted(set(int(value) for value in np.unique(categorical)) - {int(code) for code in CATEGORICAL_PROBABILITY_CODES})
+    invalid_codes = sorted(set(int(value) for value in np.unique(categorical)) - {int(code) for code in PrecipitationTypeCode})
     if invalid_codes:
         invalid = ", ".join(str(code) for code in invalid_codes)
         raise ValueError(f"ptype contains invalid code(s): {invalid}")
@@ -131,7 +152,7 @@ def _member_variable_attrs() -> dict[str, dict[str, object]]:
     return attrs
 
 
-def _final_variable_attrs() -> dict[str, dict[str, object]]:
+def _final_variable_attrs(categorical_codes: tuple[PrecipitationTypeCode, ...]) -> dict[str, dict[str, object]]:
     attrs: dict[str, dict[str, object]] = {
         "valid_member_count": {"units": "count", "long_name": "valid ensemble member count"},
         "hourly_precip_mean_mm": {"units": "mm", "long_name": "ensemble mean hourly precipitation accumulation"},
@@ -139,7 +160,7 @@ def _final_variable_attrs() -> dict[str, dict[str, object]]:
     for name, _ in PROBABILITY_TYPE_FIELDS:
         attrs[f"prob_{name}_mm_ens"] = {"units": "percent", "long_name": f"ensemble mean microphysics-consistent probability of {name}"}
         attrs[f"precip_{name}_th_ens"] = {"units": "mm", "long_name": f"ensemble mean thresholded hourly precipitation for {name}"}
-    for code in CATEGORICAL_PROBABILITY_CODES:
+    for code in categorical_codes:
         attrs[f"ptype_probability_{int(code)}"] = {"units": "percent", "long_name": f"categorical PTYPE ensemble frequency for code {int(code)}"}
     return attrs
 
@@ -210,7 +231,11 @@ def read_member_diagnostic_netcdf(path: Path) -> dict[str, np.ndarray]:
     return variables
 
 
-def aggregate_member_diagnostics(member_diagnostics: list[dict[str, np.ndarray]]) -> StepProbabilityProducts:
+def aggregate_member_diagnostics(
+    member_diagnostics: list[dict[str, np.ndarray]],
+    *,
+    categorical_codes: tuple[PrecipitationTypeCode, ...] = CATEGORICAL_PROBABILITY_CODES,
+) -> StepProbabilityProducts:
     if not member_diagnostics:
         raise ValueError("At least one member diagnostic is required")
 
@@ -242,7 +267,7 @@ def aggregate_member_diagnostics(member_diagnostics: list[dict[str, np.ndarray]]
     ptype_stack = np.stack([_validate_ptype(diagnostics["ptype"]) for diagnostics in member_diagnostics])
     categorical_probabilities = {
         int(code): np.mean(ptype_stack == int(code), axis=0) * 100.0
-        for code in CATEGORICAL_PROBABILITY_CODES
+        for code in categorical_codes
     }
     hourly_precip_mean_mm = np.mean(
         np.stack([np.asarray(diagnostics["hourly_precip_mm"], dtype=np.float64) for diagnostics in member_diagnostics]),
@@ -308,6 +333,7 @@ def _failure_summary(
     members: tuple[str, ...],
     processed_members: tuple[str, ...],
     error: str,
+    algorithm: str = ALGORITHM_FIRDEWSA,
 ) -> dict[str, object]:
     return {
         "enabled": True,
@@ -316,7 +342,8 @@ def _failure_summary(
         "scale": "percent_0_100",
         "probability_threshold_percent": DEFAULT_PROBABILITY_THRESHOLD_PERCENT,
         "intensity_precip_threshold_mm": DEFAULT_INTENSITY_PRECIP_THRESHOLD_MM,
-        "products": list(PROBABILITY_PRODUCT_NAMES),
+        "products": list(probability_product_names(algorithm)),
+        "diagnostic_algorithm": algorithm,
         "files_written": 0,
         "output_dir": str(output_dir),
         "required_members": list(members),
@@ -348,7 +375,15 @@ def _publish_probability_directory(staging_dir: Path, output_dir: Path) -> None:
         shutil.rmtree(backup_dir, ignore_errors=True)
 
 
-def disabled_probability_summary(output_root: Path, model: str, date: str, time_value: str, members: tuple[str, ...]) -> dict[str, object]:
+def disabled_probability_summary(
+    output_root: Path,
+    model: str,
+    date: str,
+    time_value: str,
+    members: tuple[str, ...],
+    *,
+    algorithm: str = ALGORITHM_FIRDEWSA,
+) -> dict[str, object]:
     return {
         "enabled": False,
         "status": "skipped",
@@ -356,7 +391,8 @@ def disabled_probability_summary(output_root: Path, model: str, date: str, time_
         "scale": "percent_0_100",
         "probability_threshold_percent": DEFAULT_PROBABILITY_THRESHOLD_PERCENT,
         "intensity_precip_threshold_mm": DEFAULT_INTENSITY_PRECIP_THRESHOLD_MM,
-        "products": list(PROBABILITY_PRODUCT_NAMES),
+        "products": list(probability_product_names(algorithm)),
+        "diagnostic_algorithm": algorithm,
         "files_written": 0,
         "output_dir": str(probability_output_dir(output_root, model, date, time_value)),
         "required_members": list(members),
@@ -376,7 +412,9 @@ def generate_probability_products(
     failed_members: tuple[str, ...],
     start_step: int,
     max_step: int,
+    algorithm: str = ALGORITHM_FIRDEWSA,
 ) -> dict[str, object]:
+    categorical_codes = _categorical_codes(algorithm)
     output_dir = probability_output_dir(output_root, model, date, time_value)
     start = time.perf_counter()
     preflight_s = 0.0
@@ -406,6 +444,7 @@ def generate_probability_products(
             members=members,
             processed_members=processed_members,
             error=str(exc),
+            algorithm=algorithm,
         )
 
     run_dir = output_dir.parent
@@ -421,7 +460,7 @@ def generate_probability_products(
             ]
             read_s += time.perf_counter() - read_start
             aggregate_start = time.perf_counter()
-            step_products = aggregate_member_diagnostics(diagnostics)
+            step_products = aggregate_member_diagnostics(diagnostics, categorical_codes=categorical_codes)
             aggregate_s += time.perf_counter() - aggregate_start
 
             staged_path = staging_dir / f"lfff{step_token(step)}.ptype_prob.nc"
@@ -439,8 +478,9 @@ def generate_probability_products(
                     "probability_threshold_percent": DEFAULT_PROBABILITY_THRESHOLD_PERCENT,
                     "intensity_precip_threshold_mm": DEFAULT_INTENSITY_PRECIP_THRESHOLD_MM,
                     "required_member_count": len(members),
+                    "diagnostic_algorithm": algorithm,
                 },
-                variable_attrs=_final_variable_attrs(),
+                variable_attrs=_final_variable_attrs(categorical_codes),
             )
             write_s += time.perf_counter() - write_start
             staged_files.append(staged_path)
@@ -455,6 +495,7 @@ def generate_probability_products(
             members=members,
             processed_members=processed_members,
             error=f"{type(exc).__name__}: {exc}",
+            algorithm=algorithm,
         )
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
@@ -466,7 +507,8 @@ def generate_probability_products(
         "scale": "percent_0_100",
         "probability_threshold_percent": DEFAULT_PROBABILITY_THRESHOLD_PERCENT,
         "intensity_precip_threshold_mm": DEFAULT_INTENSITY_PRECIP_THRESHOLD_MM,
-        "products": list(PROBABILITY_PRODUCT_NAMES),
+        "products": list(probability_product_names(algorithm)),
+        "diagnostic_algorithm": algorithm,
         "files_written": len(staged_files),
         "output_dir": str(output_dir),
         "required_members": list(members),

@@ -16,6 +16,12 @@ The project is intentionally narrow:
   member;
 - plotting, station postprocessing, and file-based input are out of scope.
 
+Two scientific modes are available. `--algorithm firdewsa` is the default and
+preserves the original thesis implementation. `--algorithm icon` selects the
+adaptation aligned with ICON commit
+[`50da7c5924994f7626688eb5185b8e66c781b12e`](https://gitlab.dkrz.de/icon/icon-nwp/-/commit/50da7c5924994f7626688eb5185b8e66c781b12e).
+The selected mode and its fidelity limitations are recorded in `summary.json`.
+
 ## Start Here
 
 Choose the path that matches what you need:
@@ -125,6 +131,10 @@ The command discovers the latest complete cycle. It succeeds when it exits with
 code 0, `monitoring.json` contains `"ok": true`, and the run directory contains
 `DONE.json`. See [Understanding a run](#understanding-a-run) for the layout.
 
+To smoke-test the ICON-adapted path, append `--algorithm icon`. That mode also
+checks and retrieves the archived `RAIN_GSP`, `SNOW_GSP`, and `GRAU_GSP`
+accumulations.
+
 ## Production Runs
 
 ### Latest complete cycle
@@ -196,7 +206,8 @@ During processing, `RUNNING.json` is present instead of the final marker.
 
 - `summary.json` contains the selected cycle and members, output counts,
   failures, data-quality counters, timings, retry statistics, and runtime/Git
-  provenance.
+  provenance. It also records `diagnostic_algorithm`, the effective
+  precipitation mask, and `algorithm_fidelity`.
 - `monitoring.json` is the scheduler contract. Its `ok`, `status`, alerts, and
   `recommended_exit_code` fields summarize whether the run is usable.
 - The CLI exits non-zero when monitoring reports a critical condition.
@@ -215,7 +226,11 @@ The categorical `PTYPE` codes are:
 | `1` | rain |
 | `3` | freezing rain |
 | `5` | snow |
+| `6` | wet snow (ICON mode) |
+| `7` | mixture of rain and snow (ICON mode) |
 | `8` | ice pellets |
+| `9` | graupel (ICON mode) |
+| `10` | hail (ICON mode; requires a supplied hail rate) |
 | `12` | freezing drizzle |
 | `13` | freezing rain on ground |
 
@@ -225,6 +240,7 @@ Run `python -m precip_type_diag --help` for the complete CLI reference. The
 options most useful for first runs are:
 
 - `--members all` or `--members 000,001`
+- `--algorithm firdewsa|icon`; default `firdewsa`
 - `--max-step N` to shorten a smoke test
 - `--workers N` to change member-level parallelism; default `8`
 - `--output-format grib2|netcdf`; default `grib2`
@@ -233,6 +249,10 @@ options most useful for first runs are:
 - `--log-format text|json` and `--log-file PATH`
 - `--no-prefetch` for debugging or performance comparison
 - `--skip-input-checks` only when deliberately bypassing FDB completeness checks
+
+The default precipitation mask is mode-specific: `0.0 mm` for `firdewsa` and
+the ICON trace threshold of `0.01 mm` for the one-hour production interval.
+An explicit `--precip-mask-threshold-mm` overrides either default.
 
 ## Troubleshooting
 

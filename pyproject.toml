@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "precip-type-diag"
-version = "0.2.0"
-description = "ICON precipitation-type diagnostic following Zukanovic MSc thesis."
+version = "0.3.0"
+description = "Selectable original Firdewsa and ICON-adapted precipitation-type diagnostic."
 readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
@@ -75,5 +75,6 @@ check_untyped_defs = true
 [tool.coverage.run]
 omit = [
   "src/precip_type_diag/benchmark.py",
+  "src/precip_type_diag/icon_numba_backend.py",
   "src/precip_type_diag/numba_backend.py",
 ]

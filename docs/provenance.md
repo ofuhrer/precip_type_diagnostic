@@ -12,6 +12,10 @@ source code is licensed under the BSD 3-Clause License in `LICENSE`.
   [local PDF](../background/Zukanovic_2023_MScThesis.pdf)
 - MeteoSwiss-APN thesis prototype:
   <https://github.com/MeteoSwiss-APN/precip_diagnostic>
+- ICON online diagnostic source, commit
+  [`50da7c5924994f7626688eb5185b8e66c781b12e`](https://gitlab.dkrz.de/icon/icon-nwp/-/commit/50da7c5924994f7626688eb5185b8e66c781b12e),
+  particularly `src/atm_phy_nwp/mo_diag_precip_type.f90`. The offline ICON mode
+  and its executable comparison harness are pinned to this revision.
 - Bourgouin, P. (2000): *A Method to Determine Precipitation Types*,
   `Weather and Forecasting`, 15(5), 583-592.
 - Birk, K., E. Lenning, K. Donofrio, and M. T. Friedlein (2021):
@@ -35,6 +39,12 @@ The bundled documents are:
 
 The scientific method sources above are the authoritative citations for this
 implementation.
+
+`test/data/icon_fortran_reference.json` is generated output, not copied source
+code. It records deterministic input columns, categorical results produced by
+the pinned Fortran module, and the SHA-256 of that module. The verifier extracts
+the module from a separate ICON checkout at runtime; the ICON Fortran source is
+not redistributed in this repository.
 
 ## ecCodes Definitions
 

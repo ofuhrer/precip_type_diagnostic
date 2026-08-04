@@ -9,12 +9,14 @@ import numpy as np
 import pytest
 
 from precip_type_diag.constants import INPUT_PARAM_IDS
+from precip_type_diag.grid import GridInputs
 from precip_type_diag.operational import (
     FdbChunk,
     FdbRun,
     FdbTransientError,
     RetryStats,
     Timings,
+    _check_complete_run,
     _fdb_utils_list,
     _fields_by_step,
     _has_complete_param,
@@ -166,6 +168,81 @@ def test_process_chunk_uses_previous_total_precip_for_first_step(monkeypatch: py
     )
 
     np.testing.assert_allclose(captured_total_precip[0], np.array([1.0, 0.0]))
+
+
+def test_icon_process_chunk_derives_archived_rates_and_applies_accumulation_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: list[GridInputs] = []
+
+    class Quality:
+        def as_dict(self):
+            return {key: 0 for key in (
+                "total_columns",
+                "active_columns",
+                "invalid_total_precip_columns",
+                "invalid_ground_temperature_columns",
+                "invalid_profile_columns",
+                "invalid_active_ground_temperature_columns",
+                "invalid_active_profile_columns",
+            )}
+
+    class Result:
+        categorical = np.array([1, 5], dtype=np.int32)
+        quality = Quality()
+
+    def fake_diagnose(inputs, **kwargs):
+        assert kwargs == {"precip_mask_threshold_mm": 0.01, "algorithm": "icon", "vertical_cutoff_m": 12000.0}
+        captured.append(inputs)
+        return Result()
+
+    monkeypatch.setattr("precip_type_diag.operational.diagnose_grid_categorical_with_quality", fake_diagnose)
+    monkeypatch.setattr("precip_type_diag.operational.write_output_grib", lambda *args, **kwargs: None)
+    chunk = FdbChunk(
+        steps=[1],
+        ml_by_step={
+            1: {
+                "T": [FakeField({"level": 1}, np.array([273.0, 274.0]))],
+                "P": [FakeField({"level": 1}, np.array([90000.0, 90000.0]))],
+                "QV": [FakeField({"level": 1}, np.array([0.002, 0.002]))],
+            }
+        },
+        total_precip_by_step={1: FakeField({}, np.array([0.5, 3.0]))},
+        ground_temperature_by_step={1: FakeField({}, np.array([273.15, 274.15]))},
+        request_s=0.0,
+        microphysics_accumulations_by_step={
+            "RAIN_GSP": {1: FakeField({}, np.array([0.2, 1.8]))},
+            "SNOW_GSP": {1: FakeField({}, np.array([0.4, 1.0]))},
+            "GRAU_GSP": {1: FakeField({}, np.array([0.1, 0.6]))},
+        },
+    )
+    previous_components = {
+        "RAIN_GSP": np.array([1.0, 0.8]),
+        "SNOW_GSP": np.array([0.1, 0.5]),
+        "GRAU_GSP": np.array([0.0, 0.1]),
+    }
+    run = FdbRun("20260531", "1800", "icon-ch1-eps", "000", "cf", None, 1)
+
+    _process_chunk(
+        chunk,
+        timings=Timings(),
+        retained_full_levels=1,
+        half_level_height_m=np.array([[1000.0, 1000.0], [0.0, 0.0]]),
+        previous_total_precip=np.array([2.0, 1.0]),
+        previous_icon_accumulations=previous_components,
+        output_root=tmp_path,
+        run=run,
+        output_model="ICON-CH1-EPS",
+        precip_mask_threshold_mm=0.01,
+        algorithm="icon",
+    )
+
+    np.testing.assert_allclose(captured[0].total_precip_mm, [0.5, 2.0])
+    np.testing.assert_allclose(captured[0].rain_rate_kg_m2_s, np.array([0.2, 1.0]) / 3600.0)
+    np.testing.assert_allclose(captured[0].snow_rate_kg_m2_s, np.array([0.3, 0.5]) / 3600.0)
+    np.testing.assert_allclose(captured[0].graupel_rate_kg_m2_s, np.array([0.1, 0.5]) / 3600.0)
+    np.testing.assert_allclose(previous_components["RAIN_GSP"], [0.2, 1.8])
 
 
 def test_process_chunk_writes_ptype_netcdf_when_output_format_is_netcdf(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -386,6 +463,20 @@ def test_has_complete_param_checks_steps_levels_and_timespan(monkeypatch: pytest
     )
 
 
+def test_icon_completeness_requires_archived_microphysics_accumulations(monkeypatch: pytest.MonkeyPatch) -> None:
+    checked_params: list[int] = []
+
+    def complete(**kwargs):
+        checked_params.append(kwargs["param"])
+        return True
+
+    monkeypatch.setattr("precip_type_diag.operational._has_complete_param", complete)
+    _check_complete_run("ICON-CH1-EPS", "000", "20260531", "1800", 1, algorithm="icon")
+
+    for name in ("RAIN_GSP", "SNOW_GSP", "GRAU_GSP"):
+        assert INPUT_PARAM_IDS[name] in checked_params
+
+
 def test_fdb_utils_list_retries_transient_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = 0
 
@@ -436,6 +527,11 @@ def test_config_for_model_rejects_invalid_values() -> None:
     assert default_config.max_workers == 8
     assert default_config.chunk_size == 2
     assert default_config.prefetch is True
+    assert default_config.algorithm == "firdewsa"
+    assert default_config.precip_mask_threshold_mm == 0.0
+    icon_config = config_for_model("ICON-CH1-EPS", algorithm="icon")
+    assert icon_config.algorithm == "icon"
+    assert icon_config.precip_mask_threshold_mm == 0.01
 
     with pytest.raises(ValueError, match="Unsupported model"):
         config_for_model("ICON-CH3-EPS")
@@ -447,6 +543,8 @@ def test_config_for_model_rejects_invalid_values() -> None:
         config_for_model("ICON-CH1-EPS", members=("011",))
     with pytest.raises(ValueError, match=r"Duplicate member\(s\): 000"):
         config_for_model("ICON-CH1-EPS", members=("000", "000"))
+    with pytest.raises(ValueError, match="Unsupported algorithm"):
+        config_for_model("ICON-CH1-EPS", algorithm="unknown")
 
 
 def test_run_operational_rejects_non_positive_monitoring_wall_limit(tmp_path: Path) -> None:
@@ -538,6 +636,8 @@ def test_run_operational_writes_summary_for_fixed_fdb_run(
     assert summary["failed"] == {}
     assert summary["failed_categories"] == {}
     assert summary["output_format"] == "grib2"
+    assert summary["diagnostic_algorithm"] == "firdewsa"
+    assert summary["algorithm_fidelity"]["mode"] == "original_firdewsa"
     assert summary["monitoring"]["ok"] is True
     assert summary["processed_members"] == ["000", "001"]
     assert summary["timings_s"]["request_s"] == 4.0
@@ -551,6 +651,36 @@ def test_run_operational_writes_summary_for_fixed_fdb_run(
     assert [run.member for run in processed] == ["000", "001"]
     assert "starting operational run model=ICON-CH1-EPS" in caplog.text
     assert "finished operational run model=ICON-CH1-EPS processed=2 failed=0" in caplog.text
+
+
+def test_run_operational_records_icon_reference_and_archive_fidelity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_process_member(**kwargs):
+        calls.append(kwargs)
+        return {"run": {"member": kwargs["member"]}, "steps": 1, "written": 1, "timings_s": {}, "wall_s": 0.0}
+
+    monkeypatch.setattr("precip_type_diag.operational._configure_meteoswiss_definitions", lambda: None)
+    monkeypatch.setattr("precip_type_diag.operational._warm_diagnostic", lambda *args: None)
+    monkeypatch.setattr("precip_type_diag.operational._process_member", fake_process_member)
+    summary = run_operational(
+        model="ICON-CH1-EPS",
+        algorithm="icon",
+        members=("000",),
+        date="20260531",
+        time_value="1800",
+        start_step=1,
+        max_step=1,
+        output_root=tmp_path,
+        workers=1,
+    )
+
+    assert calls[0]["algorithm"] == "icon"
+    assert calls[0]["precip_mask_threshold_mm"] == 0.01
+    assert summary["diagnostic_algorithm"] == "icon"
+    assert summary["algorithm_fidelity"]["reference_commit"] == "50da7c5924994f7626688eb5185b8e66c781b12e"
+    assert summary["algorithm_fidelity"]["exact_online_refinement_parity"] is False
+    assert summary["algorithm_fidelity"]["unavailable_online_rate_components"] == ["rain_con", "snow_con", "hail_gsp"]
 
 
 def test_run_operational_replaces_running_marker_on_unhandled_failure(
@@ -655,9 +785,10 @@ def test_run_operational_can_generate_probability_products(monkeypatch: pytest.M
             "members": ("000", "001"),
             "processed_members": ("000", "001"),
             "failed_members": (),
-            "start_step": 0,
-            "max_step": 0,
-        }
+                "start_step": 0,
+                "max_step": 0,
+                "algorithm": "firdewsa",
+            }
     ]
 
 

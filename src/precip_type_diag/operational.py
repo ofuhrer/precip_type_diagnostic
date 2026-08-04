@@ -28,7 +28,16 @@ import earthkit.data as ekd
 # isort: on
 import numpy as np
 
-from .constants import DEFAULT_VERTICAL_CUTOFF_M, INPUT_PARAM_IDS
+from .constants import (
+    ALGORITHM_FIRDEWSA,
+    ALGORITHM_ICON,
+    DEFAULT_VERTICAL_CUTOFF_M,
+    DIAGNOSTIC_ALGORITHMS,
+    ICON_ARCHIVED_MICROPHYSICS_ACCUMULATIONS,
+    ICON_REFERENCE_COMMIT,
+    ICON_UNAVAILABLE_ONLINE_RATE_COMPONENTS,
+    INPUT_PARAM_IDS,
+)
 from .gribio import check_precip_mask_threshold_mm, derive_vertical_level_selection, write_output_grib
 from .grid import GridInputs, diagnose_grid_categorical, diagnose_grid_categorical_with_quality, diagnose_grid_probabilities_with_quality
 from .monitoring import build_monitoring_status
@@ -73,14 +82,18 @@ TIMING_KEYS = (
     "static_decode_s",
     "static_hhl_decode_s",
     "static_prev_precip_decode_s",
+    "static_microphysics_request_s",
+    "static_microphysics_decode_s",
     "request_s",
     "request_ml_s",
     "request_total_precip_s",
     "request_ground_temperature_s",
+    "request_microphysics_s",
     "decode_s",
     "decode_ml_s",
     "decode_total_precip_s",
     "decode_ground_temperature_s",
+    "decode_microphysics_s",
     "diagnose_s",
     "write_s",
 )
@@ -149,6 +162,7 @@ class OperationalConfig:
     members: tuple[str, ...]
     output_root: Path
     precip_mask_threshold_mm: float
+    algorithm: str = ALGORITHM_FIRDEWSA
     vertical_cutoff_m: float = DEFAULT_VERTICAL_CUTOFF_M
     start_step: int = 1
     max_step: int = 0
@@ -180,14 +194,18 @@ class Timings:
     static_decode_s: float = 0.0
     static_hhl_decode_s: float = 0.0
     static_prev_precip_decode_s: float = 0.0
+    static_microphysics_request_s: float = 0.0
+    static_microphysics_decode_s: float = 0.0
     request_s: float = 0.0
     request_ml_s: float = 0.0
     request_total_precip_s: float = 0.0
     request_ground_temperature_s: float = 0.0
+    request_microphysics_s: float = 0.0
     decode_s: float = 0.0
     decode_ml_s: float = 0.0
     decode_total_precip_s: float = 0.0
     decode_ground_temperature_s: float = 0.0
+    decode_microphysics_s: float = 0.0
     diagnose_s: float = 0.0
     write_s: float = 0.0
 
@@ -202,9 +220,11 @@ class FdbChunk:
     total_precip_by_step: dict[int, FieldLike]
     ground_temperature_by_step: dict[int, FieldLike]
     request_s: float
+    microphysics_accumulations_by_step: dict[str, dict[int, FieldLike]] | None = None
     request_ml_s: float = 0.0
     request_total_precip_s: float = 0.0
     request_ground_temperature_s: float = 0.0
+    request_microphysics_s: float = 0.0
     retry_stats: dict[str, int] | None = None
 
 
@@ -227,6 +247,7 @@ class MemberProcessKwargs(TypedDict):
     check_inputs: bool
     precip_mask_threshold_mm: float
     vertical_cutoff_m: float
+    algorithm: str
     write_probability_products: bool
     output_format: str
     retry_config: RetryConfig
@@ -237,6 +258,14 @@ def normalize_output_format(value: str) -> str:
     if normalized not in OUTPUT_FORMATS:
         supported = ", ".join(OUTPUT_FORMATS)
         raise ValueError(f"Unsupported output_format {value!r}; expected one of: {supported}")
+    return normalized
+
+
+def normalize_algorithm(value: str) -> str:
+    normalized = value.lower()
+    if normalized not in DIAGNOSTIC_ALGORITHMS:
+        supported = ", ".join(DIAGNOSTIC_ALGORITHMS)
+        raise ValueError(f"Unsupported algorithm {value!r}; expected one of: {supported}")
     return normalized
 
 
@@ -273,6 +302,7 @@ def config_for_model(
     *,
     members: tuple[str, ...] | None = None,
     output_root: Path | None = None,
+    algorithm: str = ALGORITHM_FIRDEWSA,
     precip_mask_threshold_mm: float | None = None,
     vertical_cutoff_m: float = DEFAULT_VERTICAL_CUTOFF_M,
     start_step: int = 1,
@@ -285,7 +315,9 @@ def config_for_model(
     if model not in MODEL_TO_FDB:
         supported = ", ".join(sorted(MODEL_TO_FDB))
         raise ValueError(f"Unsupported model {model!r}; expected one of: {supported}")
-    threshold = check_precip_mask_threshold_mm(0.0 if precip_mask_threshold_mm is None else precip_mask_threshold_mm)
+    normalized_algorithm = normalize_algorithm(algorithm)
+    default_threshold = 0.01 if normalized_algorithm == ALGORITHM_ICON else 0.0
+    threshold = check_precip_mask_threshold_mm(default_threshold if precip_mask_threshold_mm is None else precip_mask_threshold_mm)
     effective_max_step = MODEL_MAX_STEP[model] if max_step is None else max_step
     if effective_max_step < 0:
         raise ValueError(f"max_step must be non-negative, got {effective_max_step}")
@@ -317,6 +349,7 @@ def config_for_model(
         members=selected_members,
         output_root=Path(output_root) if output_root is not None else DEFAULT_OUTPUT_ROOT,
         precip_mask_threshold_mm=threshold,
+        algorithm=normalized_algorithm,
         vertical_cutoff_m=float(vertical_cutoff_m),
         start_step=int(start_step),
         max_step=effective_max_step,
@@ -552,10 +585,12 @@ def _check_complete_run(
     time_value: str,
     max_step: int,
     start_step: int = 1,
+    algorithm: str = ALGORITHM_FIRDEWSA,
     *,
     retry_config: RetryConfig | None = None,
     retry_stats: RetryStats | None = None,
 ) -> None:
+    algorithm = normalize_algorithm(algorithm)
     diagnostic_steps = set(range(start_step, max_step + 1))
     total_precip_steps = set(range(max(0, start_step - 1), max_step + 1))
     expected_full_levels = set(range(1, FULL_LEVELS + 1))
@@ -627,6 +662,25 @@ def _check_complete_run(
                 ),
             )
         )
+    if algorithm == ALGORITHM_ICON:
+        for name in ICON_ARCHIVED_MICROPHYSICS_ACCUMULATIONS:
+            checks.append(
+                (
+                    name,
+                    _has_complete_param(
+                        model=model,
+                        member=member,
+                        date=date,
+                        time_value=time_value,
+                        param=INPUT_PARAM_IDS[name],
+                        levtype="sfc",
+                        timespan="fs",
+                        expected_steps=total_precip_steps,
+                        retry_config=retry_config,
+                        retry_stats=retry_stats,
+                    ),
+                )
+            )
     missing = [name for name, ok in checks if not ok]
     if missing:
         raise FdbIncompleteError(
@@ -642,6 +696,7 @@ def discover_complete_run(
     start_step: int,
     max_step: int,
     lookback_days: int,
+    algorithm: str = ALGORITHM_FIRDEWSA,
     retry_config: RetryConfig | None = None,
     retry_stats: RetryStats | None = None,
 ) -> FdbRun:
@@ -675,6 +730,7 @@ def discover_complete_run(
                 time_value,
                 max_step,
                 start_step=start_step,
+                algorithm=algorithm,
                 retry_config=config,
                 retry_stats=stats,
             )
@@ -762,6 +818,18 @@ def _fields_by_step(fieldlist: Iterable[FieldLike]) -> dict[int, FieldLike]:
     return result
 
 
+def _icon_microphysics_fields_by_step(fieldlist: Iterable[FieldLike]) -> dict[str, dict[int, FieldLike]]:
+    expected_names = set(ICON_ARCHIVED_MICROPHYSICS_ACCUMULATIONS)
+    result: dict[str, dict[int, FieldLike]] = {name: {} for name in ICON_ARCHIVED_MICROPHYSICS_ACCUMULATIONS}
+    for field in fieldlist:
+        param_id = int(str(field.metadata("paramId")))
+        name = PARAM_NAME_BY_ID.get(param_id)
+        if name not in expected_names:
+            raise RuntimeError(f"Unexpected ICON microphysics accumulation paramId {param_id}")
+        result[name][_step(field)] = field
+    return result
+
+
 def _ml_fields_by_step(fieldlist: Iterable[FieldLike]) -> dict[int, dict[str, list[FieldLike]]]:
     result: dict[int, dict[str, list[FieldLike]]] = {}
     for field in fieldlist:
@@ -802,7 +870,7 @@ def _step_token(step: int) -> str:
     return f"{days:02d}{hours:02d}0000"
 
 
-def _warm_diagnostic() -> None:
+def _warm_diagnostic(algorithm: str = ALGORITHM_FIRDEWSA) -> None:
     diagnose_grid_categorical(
         GridInputs(
             temperature_k=np.full((2, 1), 270.0),
@@ -811,7 +879,9 @@ def _warm_diagnostic() -> None:
             half_level_height_m=np.array([[2000.0], [1000.0], [0.0]]),
             total_precip_mm=np.array([1.0]),
             ground_temperature_c=np.array([-1.0]),
-        )
+        ),
+        algorithm=algorithm,
+        precip_mask_threshold_mm=0.01 if algorithm == ALGORITHM_ICON else 0.0,
     )
 
 
@@ -864,11 +934,45 @@ def _fetch_total_precip_step(
     return values
 
 
+def _fetch_icon_microphysics_step(
+    run: FdbRun,
+    *,
+    step: int,
+    timings: Timings,
+    retry_config: RetryConfig,
+    retry_stats: RetryStats,
+) -> dict[str, np.ndarray]:
+    request = {
+        **_base_request(run),
+        "param": "/".join(str(INPUT_PARAM_IDS[name]) for name in ICON_ARCHIVED_MICROPHYSICS_ACCUMULATIONS),
+        "levtype": "sfc",
+        "step": str(step),
+        "timespan": "fs",
+    }
+    fieldlist, request_s = _request_fieldlist(request, retry_config=retry_config, retry_stats=retry_stats)
+    timings.static_request_s += request_s
+    timings.static_microphysics_request_s += request_s
+    fields = _icon_microphysics_fields_by_step(fieldlist)
+    missing = [name for name, by_step in fields.items() if step not in by_step]
+    if missing:
+        raise RuntimeError(f"Missing ICON microphysics initialization field(s) at step {step}: {', '.join(missing)}")
+    start = time.perf_counter()
+    values = {
+        name: _field_to_numpy(by_step[step], retry_config=retry_config, retry_stats=retry_stats, flatten=False)
+        for name, by_step in fields.items()
+    }
+    decode_s = time.perf_counter() - start
+    timings.static_decode_s += decode_s
+    timings.static_microphysics_decode_s += decode_s
+    return values
+
+
 def _record_chunk_request_timings(timings: Timings, chunk: FdbChunk) -> None:
     timings.request_s += chunk.request_s
     timings.request_ml_s += chunk.request_ml_s
     timings.request_total_precip_s += chunk.request_total_precip_s
     timings.request_ground_temperature_s += chunk.request_ground_temperature_s
+    timings.request_microphysics_s += chunk.request_microphysics_s
 
 
 def _fetch_chunk(
@@ -876,10 +980,12 @@ def _fetch_chunk(
     *,
     steps: list[int],
     full_level_start: int,
+    algorithm: str = ALGORITHM_FIRDEWSA,
     timings: Timings | None = None,
     retry_config: RetryConfig | None = None,
     retry_stats: RetryStats | None = None,
 ) -> FdbChunk:
+    algorithm = normalize_algorithm(algorithm)
     config = RetryConfig() if retry_config is None else retry_config
     owns_retry_stats = retry_stats is None
     stats = RetryStats() if retry_stats is None else retry_stats
@@ -908,6 +1014,13 @@ def _fetch_chunk(
         "step": step_value,
         "timespan": "none",
     }
+    microphysics_request = {
+        **base,
+        "param": "/".join(str(INPUT_PARAM_IDS[name]) for name in ICON_ARCHIVED_MICROPHYSICS_ACCUMULATIONS),
+        "levtype": "sfc",
+        "step": step_value,
+        "timespan": "fs",
+    }
 
     ml_fields, request_ml_s = _request_fieldlist(ml_request, retry_config=config, retry_stats=stats)
     total_precip_fields, request_total_precip_s = _request_fieldlist(
@@ -920,15 +1033,27 @@ def _fetch_chunk(
         retry_config=config,
         retry_stats=stats,
     )
+    microphysics_fields: Iterable[FieldLike] = ()
+    request_microphysics_s = 0.0
+    if algorithm == ALGORITHM_ICON:
+        microphysics_fields, request_microphysics_s = _request_fieldlist(
+            microphysics_request,
+            retry_config=config,
+            retry_stats=stats,
+        )
     chunk = FdbChunk(
         steps=steps,
         ml_by_step=_ml_fields_by_step(ml_fields),
         total_precip_by_step=_fields_by_step(total_precip_fields),
         ground_temperature_by_step=_fields_by_step(ground_temperature_fields),
-        request_s=request_ml_s + request_total_precip_s + request_ground_temperature_s,
+        request_s=request_ml_s + request_total_precip_s + request_ground_temperature_s + request_microphysics_s,
+        microphysics_accumulations_by_step=(
+            _icon_microphysics_fields_by_step(microphysics_fields) if algorithm == ALGORITHM_ICON else None
+        ),
         request_ml_s=request_ml_s,
         request_total_precip_s=request_total_precip_s,
         request_ground_temperature_s=request_ground_temperature_s,
+        request_microphysics_s=request_microphysics_s,
         retry_stats=stats.as_dict() if owns_retry_stats else None,
     )
     if timings is not None:
@@ -947,15 +1072,19 @@ def _process_chunk(
     retained_full_levels: int,
     half_level_height_m: np.ndarray,
     previous_total_precip: np.ndarray | None,
+    previous_icon_accumulations: dict[str, np.ndarray] | None = None,
     output_root: Path,
     run: FdbRun,
     output_model: str,
     precip_mask_threshold_mm: float,
+    algorithm: str = ALGORITHM_FIRDEWSA,
+    vertical_cutoff_m: float = DEFAULT_VERTICAL_CUTOFF_M,
     write_probability_products: bool = False,
     output_format: str = "grib2",
     retry_config: RetryConfig | None = None,
     retry_stats: RetryStats | None = None,
 ) -> tuple[np.ndarray | None, int, int, int, int, dict[str, int]]:
+    algorithm = normalize_algorithm(algorithm)
     output_format = normalize_output_format(output_format)
     if write_probability_products and output_format != "netcdf":
         raise ValueError("write_probability_products requires output_format='netcdf'")
@@ -966,6 +1095,7 @@ def _process_chunk(
     active_columns = 0
     total_columns = 0
     data_quality = {key: 0 for key in DATA_QUALITY_KEYS}
+    icon_accumulation_state = {} if previous_icon_accumulations is None else previous_icon_accumulations
     for step in chunk.steps:
         LOGGER.info("processing member=%s step=%s", run.member, step)
         decode_start = time.perf_counter()
@@ -987,6 +1117,32 @@ def _process_chunk(
         )
         timings.decode_ground_temperature_s += time.perf_counter() - ground_temperature_decode_start
         total_precip_mm = total_precip_current if previous_total_precip is None else total_precip_current - previous_total_precip
+        if algorithm == ALGORITHM_ICON:
+            total_precip_mm = np.where(total_precip_mm < 0.0, total_precip_current, total_precip_mm)
+            if chunk.microphysics_accumulations_by_step is None:
+                raise RuntimeError("ICON mode requires archived microphysics accumulation fields")
+            microphysics_decode_start = time.perf_counter()
+            current_icon_accumulations: dict[str, np.ndarray] = {}
+            icon_rates: dict[str, np.ndarray] = {}
+            for name in ICON_ARCHIVED_MICROPHYSICS_ACCUMULATIONS:
+                fields_by_step = chunk.microphysics_accumulations_by_step.get(name, {})
+                if step not in fields_by_step:
+                    raise RuntimeError(f"ICON mode is missing {name} at step {step}")
+                current = _field_to_numpy(
+                    fields_by_step[step],
+                    retry_config=config,
+                    retry_stats=stats,
+                    flatten=False,
+                )
+                previous = icon_accumulation_state.get(name)
+                amount = current if previous is None else current - previous
+                amount = np.where(amount < 0.0, current, amount)
+                current_icon_accumulations[name] = current
+                icon_rates[name] = amount / 3600.0
+            timings.decode_microphysics_s += time.perf_counter() - microphysics_decode_start
+        else:
+            current_icon_accumulations = {}
+            icon_rates = {}
         ml_decode_start = time.perf_counter()
         temperature_k = _stack_level_fields(
             step_ml["T"],
@@ -1014,23 +1170,42 @@ def _process_chunk(
             half_level_height_m=half_level_height_m,
             total_precip_mm=total_precip_mm,
             ground_temperature_c=ground_temperature_k - 273.15,
+            rain_rate_kg_m2_s=icon_rates.get("RAIN_GSP"),
+            snow_rate_kg_m2_s=icon_rates.get("SNOW_GSP"),
+            graupel_rate_kg_m2_s=icon_rates.get("GRAU_GSP"),
         )
         timings.decode_s += time.perf_counter() - decode_start
 
         diagnose_start = time.perf_counter()
         if write_probability_products:
-            diagnostic_result = diagnose_grid_probabilities_with_quality(
-                inputs,
-                precip_mask_threshold_mm=precip_mask_threshold_mm,
-            )
+            if algorithm == ALGORITHM_ICON:
+                diagnostic_result = diagnose_grid_probabilities_with_quality(
+                    inputs,
+                    precip_mask_threshold_mm=precip_mask_threshold_mm,
+                    algorithm=algorithm,
+                    vertical_cutoff_m=vertical_cutoff_m,
+                )
+            else:
+                diagnostic_result = diagnose_grid_probabilities_with_quality(
+                    inputs,
+                    precip_mask_threshold_mm=precip_mask_threshold_mm,
+                )
             categorical = diagnostic_result.categorical
             quality_report = diagnostic_result.quality
             probabilities = diagnostic_result.probabilities
         else:
-            categorical_result = diagnose_grid_categorical_with_quality(
-                inputs,
-                precip_mask_threshold_mm=precip_mask_threshold_mm,
-            )
+            if algorithm == ALGORITHM_ICON:
+                categorical_result = diagnose_grid_categorical_with_quality(
+                    inputs,
+                    precip_mask_threshold_mm=precip_mask_threshold_mm,
+                    algorithm=algorithm,
+                    vertical_cutoff_m=vertical_cutoff_m,
+                )
+            else:
+                categorical_result = diagnose_grid_categorical_with_quality(
+                    inputs,
+                    precip_mask_threshold_mm=precip_mask_threshold_mm,
+                )
             categorical = categorical_result.categorical
             quality_report = categorical_result.quality
             probabilities = None
@@ -1053,7 +1228,10 @@ def _process_chunk(
                 "time": run.time,
                 "member": run.member,
                 "step": step,
+                "diagnostic_algorithm": algorithm,
             }
+            if algorithm == ALGORITHM_ICON:
+                attrs["icon_reference_commit"] = ICON_REFERENCE_COMMIT
             if write_probability_products:
                 if probabilities is None:
                     raise RuntimeError("diagnostic probabilities were not computed")
@@ -1076,6 +1254,7 @@ def _process_chunk(
         timings.write_s += time.perf_counter() - write_start
         written += 1
         previous_total_precip = total_precip_current
+        icon_accumulation_state.update(current_icon_accumulations)
     return previous_total_precip, written, diagnostic_netcdf_outputs_written, active_columns, total_columns, data_quality
 
 
@@ -1090,17 +1269,22 @@ def process_member_run(
     precip_mask_threshold_mm: float,
     vertical_cutoff_m: float,
     start_step: int,
+    algorithm: str = ALGORITHM_FIRDEWSA,
     write_probability_products: bool = False,
     output_format: str = "grib2",
     retry_config: RetryConfig | None = None,
 ) -> dict[str, object]:
+    algorithm = normalize_algorithm(algorithm)
     config = RetryConfig() if retry_config is None else retry_config
     retry_stats = RetryStats()
     normalized_output_format = normalize_output_format(output_format)
     if write_probability_products and normalized_output_format != "netcdf":
         raise ValueError("write_probability_products requires output_format='netcdf'")
     _configure_meteoswiss_definitions()
-    _warm_diagnostic()
+    if algorithm == ALGORITHM_ICON:
+        _warm_diagnostic(algorithm)
+    else:
+        _warm_diagnostic()
     LOGGER.info(
         "starting member=%s model=%s date=%s time=%s max_step=%s chunk_size=%s prefetch=%s",
         run.member,
@@ -1122,6 +1306,7 @@ def process_member_run(
             run.time,
             run.max_step,
             start_step=start_step,
+            algorithm=algorithm,
             retry_config=config,
             retry_stats=retry_stats,
         )
@@ -1132,12 +1317,23 @@ def process_member_run(
     half_level_height_m = full_hhl[selection.half_level_start :]
     step_chunks = _chunk_steps(list(range(start_step, run.max_step + 1)), chunk_size)
     chunk_count = len(step_chunks)
-    static_fdb_request_count = 1 + (0 if start_step == 0 else 1)
-    dynamic_fdb_request_count = 3 * chunk_count
+    static_fdb_request_count = 1 + (0 if start_step == 0 else 1) * (2 if algorithm == ALGORITHM_ICON else 1)
+    dynamic_fdb_request_count = (4 if algorithm == ALGORITHM_ICON else 3) * chunk_count
     previous_total_precip: np.ndarray | None = (
         None
         if start_step == 0
         else _fetch_total_precip_step(
+            run,
+            step=start_step - 1,
+            timings=timings,
+            retry_config=config,
+            retry_stats=retry_stats,
+        )
+    )
+    previous_icon_accumulations: dict[str, np.ndarray] = (
+        {}
+        if algorithm != ALGORITHM_ICON or start_step == 0
+        else _fetch_icon_microphysics_step(
             run,
             step=start_step - 1,
             timings=timings,
@@ -1157,6 +1353,7 @@ def process_member_run(
                 run,
                 steps=steps,
                 full_level_start=selection.full_level_start,
+                algorithm=algorithm,
                 timings=timings,
                 retry_config=config,
                 retry_stats=retry_stats,
@@ -1167,10 +1364,13 @@ def process_member_run(
                 retained_full_levels=selection.retained_full_levels,
                 half_level_height_m=half_level_height_m,
                 previous_total_precip=previous_total_precip,
+                previous_icon_accumulations=previous_icon_accumulations,
                 output_root=output_root,
                 run=run,
                 output_model=output_model,
                 precip_mask_threshold_mm=precip_mask_threshold_mm,
+                algorithm=algorithm,
+                vertical_cutoff_m=vertical_cutoff_m,
                 write_probability_products=write_probability_products,
                 output_format=normalized_output_format,
                 retry_config=config,
@@ -1189,6 +1389,7 @@ def process_member_run(
                 run,
                 steps=step_chunks[0],
                 full_level_start=selection.full_level_start,
+                algorithm=algorithm,
                 retry_config=config,
             )
             for index, expected_steps in enumerate(step_chunks):
@@ -1204,6 +1405,7 @@ def process_member_run(
                         run,
                         steps=step_chunks[index + 1],
                         full_level_start=selection.full_level_start,
+                        algorithm=algorithm,
                         retry_config=config,
                     )
                 previous_total_precip, chunk_written, chunk_diagnostic_netcdf_outputs, chunk_active, chunk_total, chunk_quality = _process_chunk(
@@ -1212,10 +1414,13 @@ def process_member_run(
                     retained_full_levels=selection.retained_full_levels,
                     half_level_height_m=half_level_height_m,
                     previous_total_precip=previous_total_precip,
+                    previous_icon_accumulations=previous_icon_accumulations,
                     output_root=output_root,
                     run=run,
                     output_model=output_model,
                     precip_mask_threshold_mm=precip_mask_threshold_mm,
+                    algorithm=algorithm,
+                    vertical_cutoff_m=vertical_cutoff_m,
                     write_probability_products=write_probability_products,
                     output_format=normalized_output_format,
                     retry_config=config,
@@ -1250,12 +1455,17 @@ def process_member_run(
         "chunk_size": chunk_size,
         "prefetch": prefetch,
         "start_step": start_step,
+        "algorithm": algorithm,
         "steps": sum(len(chunk) for chunk in step_chunks),
         "chunks": chunk_count,
         "static_fdb_request_count": static_fdb_request_count,
         "dynamic_fdb_request_count": dynamic_fdb_request_count,
         "fdb_request_count": static_fdb_request_count + dynamic_fdb_request_count,
-        "fdb_utils_check_count": 3 + len(ML_PARAMS) if check_inputs else 0,
+        "fdb_utils_check_count": (
+            3 + len(ML_PARAMS) + (len(ICON_ARCHIVED_MICROPHYSICS_ACCUMULATIONS) if algorithm == ALGORITHM_ICON else 0)
+            if check_inputs
+            else 0
+        ),
         "written": written,
         "diagnostic_netcdf_outputs_written": diagnostic_netcdf_outputs_written,
         "retained_full_levels": selection.retained_full_levels,
@@ -1282,6 +1492,7 @@ def _process_member(
     check_inputs: bool,
     precip_mask_threshold_mm: float,
     vertical_cutoff_m: float,
+    algorithm: str = ALGORITHM_FIRDEWSA,
     write_probability_products: bool = False,
     output_format: str = "grib2",
     retry_config: RetryConfig | None = None,
@@ -1295,6 +1506,7 @@ def _process_member(
         check_inputs=check_inputs,
         precip_mask_threshold_mm=precip_mask_threshold_mm,
         vertical_cutoff_m=vertical_cutoff_m,
+        algorithm=algorithm,
         start_step=start_step,
         write_probability_products=write_probability_products,
         output_format=output_format,
@@ -1439,6 +1651,7 @@ def _collect_run_metadata(
     attempt: int | None,
     output_format: str,
     write_probability_products: bool,
+    algorithm: str,
 ) -> dict[str, object]:
     scheduler: dict[str, object] = {}
     for key in ("SLURM_JOB_ID", "SLURM_JOB_NAME", "SLURM_JOB_PARTITION", "SLURM_SUBMIT_HOST"):
@@ -1456,7 +1669,27 @@ def _collect_run_metadata(
         "product_mode": {
             "output_format": output_format,
             "write_probability_products": write_probability_products,
+            "diagnostic_algorithm": algorithm,
         },
+    }
+
+
+def _algorithm_fidelity(algorithm: str) -> dict[str, object]:
+    if algorithm == ALGORITHM_FIRDEWSA:
+        return {
+            "mode": "original_firdewsa",
+            "reference": "Zukanovic MSc thesis implementation",
+            "online_alignment": "not_applicable",
+        }
+    return {
+        "mode": "icon_adapted_partial_archive",
+        "reference_commit": ICON_REFERENCE_COMMIT,
+        "thermodynamic_core": "matched_to_fortran_reference",
+        "available_archived_accumulations": [name.lower() for name in ICON_ARCHIVED_MICROPHYSICS_ACCUMULATIONS],
+        "unavailable_online_rate_components": [name.lower() for name in ICON_UNAVAILABLE_ONLINE_RATE_COMPONENTS],
+        "surface_rate_derivation": "hourly_difference_of_archived_accumulations_kg_m-2_s-1",
+        "exact_online_refinement_parity": False,
+        "limitation": "convective rain/snow and hail rates used online are not archived in the operational FDB inventory",
     }
 
 
@@ -1465,6 +1698,7 @@ def run_operational(
     *,
     model: str,
     output_root: Path | None = None,
+    algorithm: str = ALGORITHM_FIRDEWSA,
     members: tuple[str, ...] | None = None,
     date: str | None = None,
     time_value: str | None = None,
@@ -1513,6 +1747,7 @@ def run_operational(
         model,
         members=members,
         output_root=output_root,
+        algorithm=algorithm,
         precip_mask_threshold_mm=precip_mask_threshold_mm,
         vertical_cutoff_m=vertical_cutoff_m,
         start_step=start_step,
@@ -1523,7 +1758,10 @@ def run_operational(
         output_format=normalized_output_format,
     )
     _configure_meteoswiss_definitions()
-    _warm_diagnostic()
+    if config.algorithm == ALGORITHM_ICON:
+        _warm_diagnostic(config.algorithm)
+    else:
+        _warm_diagnostic()
 
     discovery_s = 0.0
     if date is None or time_value is None:
@@ -1534,6 +1772,7 @@ def run_operational(
             start_step=config.start_step,
             max_step=config.max_step,
             lookback_days=lookback_days,
+            algorithm=config.algorithm,
             retry_config=retry_config,
             retry_stats=discovery_retry_stats,
         )
@@ -1552,6 +1791,7 @@ def run_operational(
         attempt=attempt,
         output_format=config.output_format,
         write_probability_products=write_probability_products,
+        algorithm=config.algorithm,
     )
     marker_base: dict[str, object] = {
         "model": model,
@@ -1584,6 +1824,7 @@ def run_operational(
             "check_inputs": check_inputs,
             "precip_mask_threshold_mm": config.precip_mask_threshold_mm,
             "vertical_cutoff_m": config.vertical_cutoff_m,
+            "algorithm": config.algorithm,
             "write_probability_products": write_probability_products,
             "output_format": config.output_format,
             "retry_config": retry_config,
@@ -1636,6 +1877,7 @@ def run_operational(
             failed_members=tuple(sorted(failed)),
             max_step=config.max_step,
             start_step=config.start_step,
+            algorithm=config.algorithm,
         )
         LOGGER.info(
             "finished probability products model=%s date=%s time=%s status=%s files_written=%s",
@@ -1652,6 +1894,7 @@ def run_operational(
             str(date),
             str(time_value),
             config.members,
+            algorithm=config.algorithm,
         )
     summary: dict[str, object] = {
         "model": model,
@@ -1670,6 +1913,10 @@ def run_operational(
         "workers": worker_count,
         "output_root": str(config.output_root),
         "output_format": config.output_format,
+        "diagnostic_algorithm": config.algorithm,
+        "algorithm_fidelity": _algorithm_fidelity(config.algorithm),
+        "precip_mask_threshold_mm": config.precip_mask_threshold_mm,
+        "vertical_cutoff_m": config.vertical_cutoff_m,
         "discovery_s": round(discovery_s, 3),
         "timings_s": _merge_timings(ordered_results.values()),
         "retry_policy": {

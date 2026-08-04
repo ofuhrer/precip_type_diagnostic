@@ -24,12 +24,23 @@ products. Aggregation is strict: every member requested for the run must finish
 successfully. The package does not produce plotting, bias correction, station
 postprocessing, or alternative diagnostics.
 
-## Scientific Method
+## Scientific Modes
 
-The implementation follows Firdewsa Zukanovic's MSc thesis,
-*Precipitation Type Diagnostic for ICON*. The method is based on the Modified
-Bourgouin precipitation-type algorithm and uses ICON model columns to diagnose a
-categorical surface precipitation type.
+The default `firdewsa` mode follows Firdewsa Zukanovic's MSc thesis,
+*Precipitation Type Diagnostic for ICON*. It remains isolated in `profile.py`
+and `numba_backend.py`; selecting or adding the ICON mode does not alter its
+formulas or default behavior.
+
+The optional `icon` mode follows the diagnostic introduced into ICON by commit
+[`50da7c5924994f7626688eb5185b8e66c781b12e`](https://gitlab.dkrz.de/icon/icon-nwp/-/commit/50da7c5924994f7626688eb5185b8e66c781b12e).
+Its scalar reference is `icon_profile.py`, with a behaviorally matched accelerated
+path in `icon_numba_backend.py`. Relative to the thesis path, it uses ICON's
+native vapor-pressure and ice-saturation formulas, interface-height layer
+depths, zero-crossing energy integration, sign-based area interpretation, the
+corrected all-column melting energy, the `0.29` snow-energy coefficient,
+surface ice-pellet melting thresholds, large-refreezing ice-pellet suppression,
+an interval-scaled trace mask, negative-accumulation reset handling, and
+surface-microphysics refinements.
 
 The broader method lineage is:
 
@@ -44,7 +55,7 @@ The broader method lineage is:
 
 ## Input Fields
 
-The FDB production path fetches only these fields:
+Both FDB modes fetch these core fields:
 
 | Field | MeteoSwiss `paramId` | Role |
 | --- | ---: | --- |
@@ -73,9 +84,30 @@ The CLI still accepts `--start-step 0` for debugging or compatibility, but that
 output should be treated as a step-0 placeholder rather than a physically
 well-defined hourly precipitation-type diagnostic.
 
-## Column Algorithm
+ICON mode additionally requires the accumulated grid-scale microphysics fields
+available in the operational archive:
 
-The pure Python reference implementation is in `profile.py`.
+| Field | MeteoSwiss `paramId` | Offline use |
+| --- | ---: | --- |
+| `RAIN_GSP` | `500134` | hourly-mean grid-scale rain rate |
+| `SNOW_GSP` | `500053` | hourly-mean grid-scale snow rate |
+| `GRAU_GSP` | `500146` | hourly-mean grid-scale graupel rate |
+
+Each rate is derived from the current-minus-previous accumulation and divided
+by 3600 seconds. A negative accumulation delta is treated as a reset and uses
+the current accumulation, matching the ICON total-precipitation handling.
+Completeness checks require all three fields in ICON mode.
+
+This is intentionally reported as partial online fidelity. The online ICON
+call also receives convective rain, convective snow, and hail rates. Those
+components are not present in the reviewed CH1/CH2 FDB inventory, so the
+offline run cannot reproduce refinements that depend on them. They are not
+silently inferred: `summary.json["algorithm_fidelity"]` names the available and
+unavailable components and sets exact online refinement parity to false.
+
+## Column Algorithms
+
+The original pure Python reference implementation is in `profile.py`.
 
 For each active column:
 
@@ -88,7 +120,7 @@ For each active column:
    highest-probability type, using the fixed priority order in `constants.py`
    only for ties.
 
-The production grid path in `grid.py` uses the same logic through the numba
+The production grid path in `grid.py` dispatches the selected mode through its numba
 backend for speed. Dry columns, defined by
 `total_precip_mm <= precip_mask_threshold_mm`, are assigned `NO_PRECIP` directly.
 This means negative hourly precipitation deltas are treated as non-active
@@ -102,6 +134,11 @@ columns are counted in the data-quality summary but do not affect the categorica
 output because dry columns are assigned `NO_PRECIP` without thermodynamic
 diagnosis.
 
+ICON mode additionally requires positive temperature and pressure, strictly
+descending half-level interfaces, and finite supplied surface microphysics
+rates in every active column. Its trace comparison follows ICON exactly:
+precipitation amounts equal to the threshold are classified as no precipitation.
+
 ## Output Codes
 
 The categorical output is encoded as MeteoSwiss `PTYPE`:
@@ -112,7 +149,11 @@ The categorical output is encoded as MeteoSwiss `PTYPE`:
 | `1` | rain |
 | `3` | freezing rain |
 | `5` | snow |
+| `6` | wet snow |
+| `7` | mixture of rain and snow |
 | `8` | ice pellets |
+| `9` | graupel |
+| `10` | hail |
 | `12` | freezing drizzle |
 | `13` | freezing rain on ground |
 
@@ -157,6 +198,8 @@ Important implementation details:
   module then writes one final NetCDF per step under `probabilities/` with
   ensemble probability means, thresholded precipitation overlays, categorical
   `PTYPE` frequencies, valid member count, and mean hourly precipitation.
+  Firdewsa output retains its original categorical-frequency schema; ICON mode
+  additionally emits frequencies for codes `6`, `7`, `9`, and `10`.
 - `summary.json` includes runtime provenance: Python/platform metadata,
   dependency versions, Git commit, branch, dirty-worktree state, and command-line
   arguments when available.
@@ -185,8 +228,10 @@ Important implementation details:
 | chunk size | `2` forecast hours |
 | prefetch | enabled |
 | output format | `grib2` |
+| scientific algorithm | `firdewsa` |
 | vertical cutoff | `12000 m` |
-| precipitation mask threshold | `0.0 mm/h` |
+| precipitation mask threshold, Firdewsa | `0.0 mm` |
+| precipitation mask threshold, ICON | `0.01 mm` for the hourly interval |
 
 The vertical cutoff is derived from `HHL`; levels above the cutoff are discarded
 before diagnosis. The cutoff is a performance optimization and should not be
@@ -196,8 +241,11 @@ changed without scientific review.
 
 The test suite covers four areas:
 
-- `test_profile.py` and `test_numba_backend.py`: science/algorithm parity checks.
-- `test_grid.py`: grid data-quality behavior for dry and active columns.
+- `test_profile.py` and `test_numba_backend.py`: original Firdewsa science and
+  accelerated-reference parity checks.
+- `test_icon_profile.py`: frozen vectors produced by executing the exact ICON
+  Fortran source at the pinned commit.
+- `test_grid.py`: grid data-quality behavior and ICON scalar/numba/Fortran-vector parity.
 - `test_probabilities.py`: NetCDF member output, aggregation, and strict completeness
   checks.
 - `test_operational.py` and `test_cli.py`: mocked FDB orchestration and CLI
@@ -216,6 +264,22 @@ uenv run --view=realtime fdb/5.18:v3 -- \
 ```
 
 Formal releases should rerun the smoke test from the annotated release tag.
+Run it once with the default Firdewsa mode and once with `--algorithm icon` for
+each model when promoting changes to the dual-mode implementation.
+
+For local executable Fortran parity, use an ICON checkout that contains the
+pinned commit:
+
+```bash
+PYTHONPATH=src python tools/verify_icon_fortran.py --icon-repo /path/to/icon-nwp
+```
+
+The verifier extracts `mo_diag_precip_type.f90` with `git show`, compiles that
+exact blob with minimal dependency stubs, and runs the same deterministic raw
+columns through Fortran and Python. It can refresh the committed frozen vectors
+with `--write-vectors test/data/icon_fortran_reference.json`. The source SHA-256
+is stored in the vector file, so a different upstream blob cannot be mistaken
+for the reviewed reference.
 
 ## References
 

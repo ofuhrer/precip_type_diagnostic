@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from .constants import DEFAULT_VERTICAL_CUTOFF_M
+from .constants import ALGORITHM_FIRDEWSA, DEFAULT_VERTICAL_CUTOFF_M, DIAGNOSTIC_ALGORITHMS
 from .operational import (
     MODEL_MAX_STEP,
     MODEL_TO_FDB,
@@ -61,6 +61,12 @@ def configure_logging(*, level: str, log_format: str, log_file: Path | None) -> 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ICON FDB precipitation-type diagnostic")
     parser.add_argument("--model", choices=sorted(MODEL_TO_FDB), required=True)
+    parser.add_argument(
+        "--algorithm",
+        choices=DIAGNOSTIC_ALGORITHMS,
+        default=ALGORITHM_FIRDEWSA,
+        help="Scientific algorithm: preserve the original Firdewsa method (default) or use the ICON-adapted diagnostic.",
+    )
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--members", default="all", help="Use 'all' or a comma-separated list like 000,001")
     parser.add_argument("--date", default=None, help="FDB run date YYYYMMDD. Default: discover latest complete run.")
@@ -91,7 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-prefetch", action="store_true", help="Disable chunk prefetching")
     parser.add_argument("--skip-input-checks", action="store_true", help="Skip FDB completeness checks")
-    parser.add_argument("--precip-mask-threshold-mm", type=float, default=None)
+    parser.add_argument(
+        "--precip-mask-threshold-mm",
+        type=float,
+        default=None,
+        help="Override the precipitation amount mask (default: 0.0 for Firdewsa, 0.01 for hourly ICON mode).",
+    )
     parser.add_argument("--vertical-cutoff-m", type=float, default=DEFAULT_VERTICAL_CUTOFF_M)
     return parser
 
@@ -145,6 +156,7 @@ def main() -> int:
 
     summary = run_operational(
         model=args.model,
+        algorithm=args.algorithm,
         output_root=args.output_root,
         members=members,
         date=args.date,

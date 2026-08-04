@@ -22,6 +22,8 @@ def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None
             "precip_type_diag",
             "--model",
             "ICON-CH1-EPS",
+            "--algorithm",
+            "icon",
             "--output-root",
             "/products",
             "--members",
@@ -79,6 +81,7 @@ def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None
     assert calls == [
         {
             "model": "ICON-CH1-EPS",
+            "algorithm": "icon",
             "output_root": Path("/products"),
             "members": ("000", "001"),
             "date": "20260531",

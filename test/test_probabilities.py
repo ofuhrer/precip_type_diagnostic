@@ -187,6 +187,42 @@ def test_generate_probability_products_writes_step_netcdf(tmp_path: Path) -> Non
     np.testing.assert_allclose(variables["ptype_probability_0"], np.array([[50.0, 0.0], [0.0, 0.0]]))
     np.testing.assert_allclose(variables["ptype_probability_1"], np.array([[50.0, 100.0], [0.0, 0.0]]))
     np.testing.assert_allclose(variables["valid_member_count"], np.full((2, 2), 2.0))
+    assert "ptype_probability_6" not in variables
+
+
+def test_icon_probability_products_include_refined_category_frequencies(tmp_path: Path) -> None:
+    date = "20260531"
+    time_value = "1800"
+    destination = tmp_path / "ICON-CH1-EPS" / date / time_value / "000" / "lfff00000000.ptype.nc"
+    write_member_diagnostic_netcdf(
+        destination,
+        ptype=np.array([[6, 7], [9, 10]], dtype=np.int32),
+        hourly_precip_mm=np.ones((2, 2)),
+        probabilities=_probabilities(0.0),
+        attrs={"model": "ICON-CH1-EPS", "date": date, "time": time_value, "member": "000", "step": 0},
+    )
+
+    summary = generate_probability_products(
+        output_root=tmp_path,
+        model="ICON-CH1-EPS",
+        date=date,
+        time_value=time_value,
+        members=("000",),
+        processed_members=("000",),
+        failed_members=(),
+        start_step=0,
+        max_step=0,
+        algorithm="icon",
+    )
+
+    assert summary["status"] == "ok"
+    assert summary["diagnostic_algorithm"] == "icon"
+    for code in (6, 7, 9, 10):
+        assert f"ptype_probability_{code}" in summary["products"]
+    output_path = tmp_path / "ICON-CH1-EPS" / date / time_value / "probabilities" / "lfff00000000.ptype_prob.nc"
+    variables = read_netcdf(output_path)
+    for code, index in ((6, (0, 0)), (7, (0, 1)), (9, (1, 0)), (10, (1, 1))):
+        assert variables[f"ptype_probability_{code}"][index] == 100.0
 
 
 def test_generate_probability_products_replaces_existing_step_set(tmp_path: Path) -> None:

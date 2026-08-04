@@ -29,6 +29,13 @@ Before tagging a release:
    python -m pip check
    ```
 
+   When the ICON-adapted science changes, also execute the pinned Fortran
+   comparison against an ICON checkout:
+
+   ```bash
+   PYTHONPATH=src python tools/verify_icon_fortran.py --icon-repo /path/to/icon-nwp
+   ```
+
 2. Confirm the GitHub Actions `tests` workflow passes for the release branch.
 3. Run a Balfrin FDB smoke test for each operational model:
 
@@ -44,8 +51,10 @@ Before tagging a release:
    ```
 
    The command shows CH2. Repeat it with `--model ICON-CH1-EPS` and a separate
-   output directory. The [release checklist](release-checklist.md) provides a
-   loop that runs both models.
+   output directory. For dual-mode science or FDB changes, repeat both model
+   checks with `--algorithm icon` and confirm the archived rain, snow, and
+   graupel accumulations pass completeness checks. The
+   [release checklist](release-checklist.md) provides a loop that runs both models.
 
    The tested `fdb/5.18:v3` setup uses a uenv-created `.venv-fdb` for `numba`
    and `netCDF4` while keeping the FDB site-packages first on `PYTHONPATH`.
@@ -73,7 +82,9 @@ candidate or accepted production release. The operational summary records:
 - operating system summary;
 - package versions for the runtime dependencies;
 - Git commit, branch, and dirty-worktree flag when available;
-- command-line arguments.
+- command-line arguments;
+- selected diagnostic algorithm, effective trace threshold, and known ICON
+  archived-microphysics fidelity limits.
 
 Do not promote output generated from a dirty worktree unless the exact diff is
 archived and approved.

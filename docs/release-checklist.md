@@ -32,6 +32,17 @@ python -m pip check
 Expected result: all commands pass. The pytest command enforces the configured
 coverage threshold.
 
+For changes to the ICON-adapted path, also record an executable comparison with
+the pinned upstream Fortran source:
+
+```bash
+PYTHONPATH=src python tools/verify_icon_fortran.py --icon-repo /path/to/icon-nwp
+```
+
+- ICON checkout commit:
+- Fortran source SHA-256:
+- Harness result:
+
 ## Balfrin Smoke Tests
 
 Run the smoke test once for each operational model. This loop keeps the output
@@ -67,6 +78,9 @@ Record:
 Required result: `monitoring.json["ok"]` is `true`; at least one member output
 file is re-read and checked for `PTYPE` metadata/variable shape and allowed
 category codes.
+
+For dual-mode science or FDB changes, repeat the loop with `--algorithm icon`
+and record `summary.json["algorithm_fidelity"]` for both models.
 
 ## DEPL-Style Production Smoke
 

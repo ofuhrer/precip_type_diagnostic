@@ -8,6 +8,11 @@ from __future__ import annotations
 
 from enum import IntEnum
 
+ALGORITHM_FIRDEWSA = "firdewsa"
+ALGORITHM_ICON = "icon"
+DIAGNOSTIC_ALGORITHMS = (ALGORITHM_FIRDEWSA, ALGORITHM_ICON)
+ICON_REFERENCE_COMMIT = "50da7c5924994f7626688eb5185b8e66c781b12e"
+
 KELVIN_OFFSET = 273.15
 GRAVITY = 9.81
 
@@ -75,7 +80,13 @@ INPUT_PARAM_IDS = {
     "QS": 500103,
     "QG": 500106,
     "T_SO": 500166,
+    "RAIN_GSP": 500134,
+    "SNOW_GSP": 500053,
+    "GRAU_GSP": 500146,
 }
+
+ICON_ARCHIVED_MICROPHYSICS_ACCUMULATIONS = ("RAIN_GSP", "SNOW_GSP", "GRAU_GSP")
+ICON_UNAVAILABLE_ONLINE_RATE_COMPONENTS = ("RAIN_CON", "SNOW_CON", "HAIL_GSP")
 
 REQUIRED_INPUT_FIELDS = ("T", "P", "QV", "HHL", "TOT_PREC", "T_G")
 
@@ -95,7 +106,11 @@ class PrecipitationTypeCode(IntEnum):
     RAIN = 1
     FREEZING_RAIN = 3
     SNOW = 5
+    WET_SNOW = 6
+    RAIN_SNOW_MIXED = 7
     ICE_PELLETS = 8
+    GRAUPEL = 9
+    HAIL = 10
     FREEZING_DRIZZLE = 12
     FREEZING_RAIN_ON_GROUND = 13
 
@@ -105,7 +120,11 @@ PRECIPITATION_TYPE_NAMES = {
     PrecipitationTypeCode.RAIN: "rain",
     PrecipitationTypeCode.FREEZING_RAIN: "freezing_rain",
     PrecipitationTypeCode.SNOW: "snow",
+    PrecipitationTypeCode.WET_SNOW: "wet_snow",
+    PrecipitationTypeCode.RAIN_SNOW_MIXED: "rain_snow_mixed",
     PrecipitationTypeCode.ICE_PELLETS: "ice_pellets",
+    PrecipitationTypeCode.GRAUPEL: "graupel",
+    PrecipitationTypeCode.HAIL: "hail",
     PrecipitationTypeCode.FREEZING_DRIZZLE: "freezing_drizzle",
     PrecipitationTypeCode.FREEZING_RAIN_ON_GROUND: "freezing_rain_on_ground",
 }
@@ -128,6 +147,25 @@ CATEGORICAL_PROBABILITY_CODES = (
     PrecipitationTypeCode.FREEZING_DRIZZLE,
     PrecipitationTypeCode.FREEZING_RAIN_ON_GROUND,
 )
+
+ICON_CATEGORICAL_PROBABILITY_CODES = (
+    PrecipitationTypeCode.NO_PRECIP,
+    PrecipitationTypeCode.RAIN,
+    PrecipitationTypeCode.FREEZING_RAIN,
+    PrecipitationTypeCode.SNOW,
+    PrecipitationTypeCode.WET_SNOW,
+    PrecipitationTypeCode.RAIN_SNOW_MIXED,
+    PrecipitationTypeCode.ICE_PELLETS,
+    PrecipitationTypeCode.GRAUPEL,
+    PrecipitationTypeCode.HAIL,
+    PrecipitationTypeCode.FREEZING_DRIZZLE,
+    PrecipitationTypeCode.FREEZING_RAIN_ON_GROUND,
+)
+
+CATEGORICAL_PROBABILITY_CODES_BY_ALGORITHM = {
+    ALGORITHM_FIRDEWSA: CATEGORICAL_PROBABILITY_CODES,
+    ALGORITHM_ICON: ICON_CATEGORICAL_PROBABILITY_CODES,
+}
 
 MEMBER_DIAGNOSTIC_VARIABLES = (
     "ptype",
