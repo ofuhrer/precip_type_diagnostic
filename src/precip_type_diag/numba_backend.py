@@ -23,6 +23,8 @@ njit = _numba.njit
 
 @njit(cache=True)
 def _clip_probability_numba(value: float) -> float:
+    if not np.isfinite(value):
+        return 0.0
     if value < 0.0:
         return 0.0
     if value > 100.0:
@@ -43,6 +45,13 @@ def _prob_ice_from_temperature_numba(min_temperature_c: float) -> float:
         - 449.6 * min_temperature_c
         - 1308.0
     )
+
+
+@njit(cache=True)
+def _ice_pellet_ice_probability_numba(refreezing_energy: float, melting_energy: float) -> float:
+    if melting_energy <= -1.0:
+        return 0.0
+    return _clip_probability_numba(2.3 * refreezing_energy - 42.0 * np.log(melting_energy + 1.0) + 3.0)
 
 
 @njit(cache=True)
@@ -137,6 +146,8 @@ def _prob_ice_numba(
                 has_valid_layer = True
 
     if not has_precip_layer:
+        if relaxed_precip_layers and layer_count > 0:
+            return _prob_ice_from_temperature_numba(minimum_temperatures[0]), True
         return 0.0, False
     if has_valid_layer:
         return _prob_ice_from_temperature_numba(best_valid_min_temperature), True
@@ -285,6 +296,35 @@ def _categorical_code_numba(
 
 
 @njit(cache=True)
+def _probability_tuple_total_numba(probabilities: tuple[float, float, float, float, float, float]) -> float:
+    return probabilities[0] + probabilities[1] + probabilities[2] + probabilities[3] + probabilities[4] + probabilities[5]
+
+
+@njit(cache=True)
+def _categorical_code_from_tuple_numba(probabilities: tuple[float, float, float, float, float, float]) -> int:
+    rain, snow, ice_pellets, freezing_drizzle, freezing_rain_on_ground, freezing_rain = probabilities
+    return _categorical_code_numba(
+        freezing_rain,
+        freezing_rain_on_ground,
+        ice_pellets,
+        freezing_drizzle,
+        snow,
+        rain,
+    )
+
+
+@njit(cache=True)
+def _no_areas_probabilities_numba(prob_ice: float, surface_tw_c: float) -> tuple[float, float, float, float, float, float]:
+    snow = _clip_probability_numba(prob_ice)
+    freezing_drizzle = _clip_probability_numba(100.0 - snow)
+    rain = 0.0
+    if surface_tw_c > 0.0:
+        rain = freezing_drizzle
+        freezing_drizzle = 0.0
+    return rain, snow, 0.0, freezing_drizzle, 0.0, 0.0
+
+
+@njit(cache=True)
 def _no_areas_code_numba(prob_ice: float, surface_tw_c: float) -> int:
     snow = _clip_probability_numba(prob_ice)
     freezing_drizzle = _clip_probability_numba(100.0 - snow)
@@ -293,6 +333,107 @@ def _no_areas_code_numba(prob_ice: float, surface_tw_c: float) -> int:
         rain = freezing_drizzle
         freezing_drizzle = 0.0
     return _categorical_code_numba(0.0, 0.0, 0.0, freezing_drizzle, snow, rain)
+
+
+@njit(cache=True)
+def _areas_to_probabilities_numba(
+    energies: np.ndarray,
+    energy_count: int,
+    prob_ice: float,
+    surface_tw_c: float,
+    ground_temperature_c: float,
+) -> tuple[float, float, float, float, float, float]:
+    if energy_count == 0:
+        return _no_areas_probabilities_numba(prob_ice, surface_tw_c)
+
+    freezing_rain = 0.0
+    freezing_rain_on_ground = 0.0
+    ice_pellets = 0.0
+    freezing_drizzle = 0.0
+    snow = 0.0
+    rain = 0.0
+
+    if energy_count == 1:
+        melting_energy = energies[0]
+        snow_ice = _clip_probability_numba(1540.0 * np.exp(-0.29 * melting_energy))
+        snow = _clip_probability_numba((prob_ice / 100.0) * snow_ice)
+        rain = 100.0 - snow
+        if ground_temperature_c < GROUND_FREEZING_THRESHOLD_C:
+            freezing_rain_on_ground = rain
+        if surface_tw_c < 0.0:
+            refreezing_energy = SHALLOW_SURFACE_REFREEZING_JKG
+            fzra_ice = -2.1 * refreezing_energy + 0.2 * melting_energy + 458.0
+            if melting_energy < 5.0:
+                fzra_ice *= 0.2 * melting_energy
+            freezing_rain = _clip_probability_numba(
+                (100.0 - prob_ice) + (prob_ice / 100.0) * _clip_probability_numba(fzra_ice)
+            )
+
+            ice_pellet_ice = _ice_pellet_ice_probability_numba(refreezing_energy, melting_energy)
+            ice_pellets = _clip_probability_numba((prob_ice / 100.0) * ice_pellet_ice)
+            rain = 0.0
+            freezing_rain_on_ground = 0.0
+
+    elif energy_count >= 2 and energy_count % 2 == 0:
+        melting_energy = energies[1]
+        refreezing_energy = abs(energies[0])
+
+        snow_ice = _clip_probability_numba(1540.0 * np.exp(-0.28 * melting_energy))
+        snow = _clip_probability_numba((prob_ice / 100.0) * snow_ice)
+
+        ice_pellet_ice = _ice_pellet_ice_probability_numba(refreezing_energy, melting_energy)
+        ice_pellets = _clip_probability_numba((prob_ice / 100.0) * ice_pellet_ice)
+
+        fzra_ice = -2.1 * refreezing_energy + 0.2 * melting_energy + 458.0
+        if melting_energy < 5.0:
+            fzra_ice *= 0.2 * melting_energy
+        freezing_rain = _clip_probability_numba(
+            (100.0 - prob_ice) + (prob_ice / 100.0) * _clip_probability_numba(fzra_ice)
+        )
+
+        if surface_tw_c > 0.0:
+            freezing_rain = 0.0
+
+    else:
+        upper_melting_energy = energies[2]
+        surface_melting_energy = energies[0]
+        total_melting_energy = upper_melting_energy + surface_melting_energy
+        refreezing_energy = abs(energies[1])
+
+        ice_pellet_ice = _ice_pellet_ice_probability_numba(refreezing_energy, upper_melting_energy)
+        ice_pellets = _clip_probability_numba((prob_ice / 100.0) * ice_pellet_ice)
+
+        rain_ice = -2.1 * refreezing_energy + 0.2 * upper_melting_energy + 458.0
+        if upper_melting_energy < 5.0:
+            rain_ice *= 0.2 * upper_melting_energy
+        rain = _clip_probability_numba((100.0 - prob_ice) + (prob_ice / 100.0) * _clip_probability_numba(rain_ice))
+
+        snow_ice = _clip_probability_numba(1540.0 * np.exp(-0.28 * total_melting_energy))
+        snow = _clip_probability_numba((prob_ice / 100.0) * snow_ice)
+
+        if ground_temperature_c < GROUND_FREEZING_THRESHOLD_C:
+            freezing_rain_on_ground = rain
+
+        if surface_tw_c < 0.0:
+            refreezing_energy = SHALLOW_SURFACE_REFREEZING_JKG
+            melting_energy = energies[0]
+            fzra_ice = -2.1 * refreezing_energy + 0.2 * melting_energy + 458.0
+            if melting_energy < 5.0:
+                fzra_ice *= 0.2 * melting_energy
+            freezing_rain = _clip_probability_numba(
+                (100.0 - prob_ice) + (prob_ice / 100.0) * _clip_probability_numba(fzra_ice)
+            )
+            rain = 0.0
+            freezing_rain_on_ground = 0.0
+
+    return (
+        _clip_probability_numba(rain),
+        _clip_probability_numba(snow),
+        _clip_probability_numba(ice_pellets),
+        _clip_probability_numba(freezing_drizzle),
+        _clip_probability_numba(freezing_rain_on_ground),
+        _clip_probability_numba(freezing_rain),
+    )
 
 
 @njit(cache=True)
@@ -329,7 +470,7 @@ def _areas_to_code_numba(
                 (100.0 - prob_ice) + (prob_ice / 100.0) * _clip_probability_numba(fzra_ice)
             )
 
-            ice_pellet_ice = _clip_probability_numba(2.3 * refreezing_energy - 42.0 * np.log(melting_energy + 1.0) + 3.0)
+            ice_pellet_ice = _ice_pellet_ice_probability_numba(refreezing_energy, melting_energy)
             ice_pellets = _clip_probability_numba((prob_ice / 100.0) * ice_pellet_ice)
             rain = 0.0
             freezing_rain_on_ground = 0.0
@@ -341,7 +482,7 @@ def _areas_to_code_numba(
         snow_ice = _clip_probability_numba(1540.0 * np.exp(-0.28 * melting_energy))
         snow = _clip_probability_numba((prob_ice / 100.0) * snow_ice)
 
-        ice_pellet_ice = _clip_probability_numba(2.3 * refreezing_energy - 42.0 * np.log(melting_energy + 1.0) + 3.0)
+        ice_pellet_ice = _ice_pellet_ice_probability_numba(refreezing_energy, melting_energy)
         ice_pellets = _clip_probability_numba((prob_ice / 100.0) * ice_pellet_ice)
 
         fzra_ice = -2.1 * refreezing_energy + 0.2 * melting_energy + 458.0
@@ -360,7 +501,7 @@ def _areas_to_code_numba(
         total_melting_energy = upper_melting_energy + surface_melting_energy
         refreezing_energy = abs(energies[1])
 
-        ice_pellet_ice = _clip_probability_numba(2.3 * refreezing_energy - 42.0 * np.log(upper_melting_energy + 1.0) + 3.0)
+        ice_pellet_ice = _ice_pellet_ice_probability_numba(refreezing_energy, upper_melting_energy)
         ice_pellets = _clip_probability_numba((prob_ice / 100.0) * ice_pellet_ice)
 
         rain_ice = -2.1 * refreezing_energy + 0.2 * upper_melting_energy + 458.0
@@ -460,6 +601,76 @@ def diagnose_column_categorical_numba(
 
 
 @njit(cache=True)
+def diagnose_column_probabilities_numba(
+    temperature_c: np.ndarray,
+    wet_bulb_c: np.ndarray,
+    relative_humidity_ice_pct: np.ndarray,
+    full_level_height_m: np.ndarray,
+    total_precip_mm: float,
+    ground_temperature_c: float,
+    precip_mask_threshold_mm: float,
+) -> tuple[int, float, float, float, float, float, float]:
+    zero_probabilities = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    if total_precip_mm <= precip_mask_threshold_mm:
+        return 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+    (
+        is_precipitating,
+        starts,
+        depths,
+        minimum_temperatures,
+        layer_count,
+    ) = _build_layers_numba(relative_humidity_ice_pct, temperature_c, full_level_height_m)
+
+    pure_prob_ice, pure_has_precip_generation = _prob_ice_numba(
+        is_precipitating,
+        starts,
+        depths,
+        minimum_temperatures,
+        layer_count,
+        False,
+    )
+    energies, energy_count = _energies_surface_up_numba(wet_bulb_c, full_level_height_m)
+
+    probabilities = zero_probabilities
+    if pure_has_precip_generation:
+        probabilities = _areas_to_probabilities_numba(
+            energies,
+            energy_count,
+            pure_prob_ice,
+            wet_bulb_c[wet_bulb_c.size - 1],
+            ground_temperature_c,
+        )
+    if _probability_tuple_total_numba(probabilities) <= 0.0:
+        microphysics_prob_ice, microphysics_has_precip_generation = _prob_ice_numba(
+            is_precipitating,
+            starts,
+            depths,
+            minimum_temperatures,
+            layer_count,
+            True,
+        )
+        if microphysics_has_precip_generation:
+            probabilities = _areas_to_probabilities_numba(
+                energies,
+                energy_count,
+                microphysics_prob_ice,
+                wet_bulb_c[wet_bulb_c.size - 1],
+                ground_temperature_c,
+            )
+
+    return (
+        _categorical_code_from_tuple_numba(probabilities),
+        probabilities[0],
+        probabilities[1],
+        probabilities[2],
+        probabilities[3],
+        probabilities[4],
+        probabilities[5],
+    )
+
+
+@njit(cache=True)
 def diagnose_grid_categorical_numba_kernel(
     temperature_c_2d: np.ndarray,
     wet_bulb_c_2d: np.ndarray,
@@ -481,3 +692,35 @@ def diagnose_grid_categorical_numba_kernel(
             precip_mask_threshold_mm,
         )
     return output
+
+
+@njit(cache=True)
+def diagnose_grid_probabilities_numba_kernel(
+    temperature_c_2d: np.ndarray,
+    wet_bulb_c_2d: np.ndarray,
+    relative_humidity_ice_pct_2d: np.ndarray,
+    full_level_height_m_2d: np.ndarray,
+    total_precip_mm: np.ndarray,
+    ground_temperature_c: np.ndarray,
+    precip_mask_threshold_mm: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    categorical = np.zeros(total_precip_mm.size, dtype=np.int32)
+    probabilities = np.zeros((6, total_precip_mm.size), dtype=np.float64)
+    for index in range(total_precip_mm.size):
+        result = diagnose_column_probabilities_numba(
+            temperature_c_2d[:, index],
+            wet_bulb_c_2d[:, index],
+            relative_humidity_ice_pct_2d[:, index],
+            full_level_height_m_2d[:, index],
+            total_precip_mm[index],
+            ground_temperature_c[index],
+            precip_mask_threshold_mm,
+        )
+        categorical[index] = result[0]
+        probabilities[0, index] = result[1]
+        probabilities[1, index] = result[2]
+        probabilities[2, index] = result[3]
+        probabilities[3, index] = result[4]
+        probabilities[4, index] = result[5]
+        probabilities[5, index] = result[6]
+    return categorical, probabilities

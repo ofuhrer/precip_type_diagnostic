@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import eccodes
 import numpy as np
 import pytest
 from earthkit.data import from_source
-from earthkit.data.encoders.grib import GribEncoder
 
 from precip_type_diag.constants import OUTPUT_PARAM_ID, OUTPUT_SHORT_NAME
 from precip_type_diag.gribio import (
@@ -17,30 +17,34 @@ from precip_type_diag.gribio import (
 
 
 def _write_template_grib(path: Path) -> object:
-    encoder = GribEncoder()
-    with path.open("wb") as handle:
-        encoder.encode(
-            values=np.array([[0.0, 1.0], [2.0, 3.0]]),
-            metadata={
-                "gridType": "regular_ll",
-                "Nx": 2,
-                "Ny": 2,
-                "latitudeOfFirstGridPointInDegrees": 1.0,
-                "longitudeOfFirstGridPointInDegrees": 0.0,
-                "latitudeOfLastGridPointInDegrees": 0.0,
-                "longitudeOfLastGridPointInDegrees": 1.0,
-                "iDirectionIncrementInDegrees": 1.0,
-                "jDirectionIncrementInDegrees": 1.0,
-                "date": 20260423,
-                "time": 0,
-                "step": 1,
-                "shortName": "T_G",
-                "typeOfFirstFixedSurface": 1,
-                "scaledValueOfFirstFixedSurface": 0,
-                "scaleFactorOfFirstFixedSurface": 0,
-                "packingType": "grid_simple",
-            },
-        ).to_file(handle)
+    handle_id = eccodes.codes_grib_new_from_samples("regular_ll_sfc_grib2")
+    try:
+        for key, value in {
+            "Ni": 2,
+            "Nj": 2,
+            "latitudeOfFirstGridPointInDegrees": 1.0,
+            "longitudeOfFirstGridPointInDegrees": 0.0,
+            "latitudeOfLastGridPointInDegrees": 0.0,
+            "longitudeOfLastGridPointInDegrees": 1.0,
+            "iDirectionIncrementInDegrees": 1.0,
+            "jDirectionIncrementInDegrees": 1.0,
+            "date": 20260423,
+            "time": 0,
+            "step": 1,
+            "discipline": 0,
+            "parameterCategory": 0,
+            "parameterNumber": 0,
+            "typeOfFirstFixedSurface": 1,
+            "scaledValueOfFirstFixedSurface": 0,
+            "scaleFactorOfFirstFixedSurface": 0,
+            "packingType": "grid_simple",
+        }.items():
+            eccodes.codes_set(handle_id, key, value)
+        eccodes.codes_set_values(handle_id, np.array([[0.0, 1.0], [2.0, 3.0]]).reshape(-1))
+        with path.open("wb") as handle:
+            eccodes.codes_write(handle_id, handle)
+    finally:
+        eccodes.codes_release(handle_id)
     return from_source("file", str(path))[0]
 
 

@@ -84,6 +84,9 @@ OUTPUT_SHORT_NAME = "PTYPE"
 OUTPUT_NAME = "Precipitation type"
 OUTPUT_UNITS = "code table 4.201"
 
+DEFAULT_PROBABILITY_THRESHOLD_PERCENT = 30.0
+DEFAULT_INTENSITY_PRECIP_THRESHOLD_MM = 0.01
+
 
 class PrecipitationTypeCode(IntEnum):
     """Categorical output codes."""
@@ -106,6 +109,40 @@ PRECIPITATION_TYPE_NAMES = {
     PrecipitationTypeCode.FREEZING_DRIZZLE: "freezing_drizzle",
     PrecipitationTypeCode.FREEZING_RAIN_ON_GROUND: "freezing_rain_on_ground",
 }
+
+PROBABILITY_TYPE_FIELDS = (
+    ("rain", PrecipitationTypeCode.RAIN),
+    ("snow", PrecipitationTypeCode.SNOW),
+    ("ice_pellets", PrecipitationTypeCode.ICE_PELLETS),
+    ("freezing_drizzle", PrecipitationTypeCode.FREEZING_DRIZZLE),
+    ("freezing_rain_on_ground", PrecipitationTypeCode.FREEZING_RAIN_ON_GROUND),
+    ("freezing_rain", PrecipitationTypeCode.FREEZING_RAIN),
+)
+
+CATEGORICAL_PROBABILITY_CODES = (
+    PrecipitationTypeCode.NO_PRECIP,
+    PrecipitationTypeCode.RAIN,
+    PrecipitationTypeCode.FREEZING_RAIN,
+    PrecipitationTypeCode.SNOW,
+    PrecipitationTypeCode.ICE_PELLETS,
+    PrecipitationTypeCode.FREEZING_DRIZZLE,
+    PrecipitationTypeCode.FREEZING_RAIN_ON_GROUND,
+)
+
+MEMBER_DIAGNOSTIC_VARIABLES = (
+    "ptype",
+    "hourly_precip_mm",
+    *(f"prob_{name}_mm" for name, _ in PROBABILITY_TYPE_FIELDS),
+    *(f"precip_{name}_th_mm" for name, _ in PROBABILITY_TYPE_FIELDS),
+)
+
+FINAL_PROBABILITY_VARIABLES = (
+    *(f"prob_{name}_mm_ens" for name, _ in PROBABILITY_TYPE_FIELDS),
+    *(f"precip_{name}_th_ens" for name, _ in PROBABILITY_TYPE_FIELDS),
+    *(f"ptype_probability_{int(code)}" for code in CATEGORICAL_PROBABILITY_CODES),
+    "valid_member_count",
+    "hourly_precip_mean_mm",
+)
 
 FREEZING_PRECIP_TYPES = frozenset(
     {

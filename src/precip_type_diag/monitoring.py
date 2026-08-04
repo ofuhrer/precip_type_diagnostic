@@ -34,12 +34,15 @@ def _missing_output_files(summary: dict[str, Any]) -> list[str]:
     model = str(summary["model"])
     date = str(summary["date"])
     time_value = str(summary["time"])
+    start_step = int(summary.get("start_step", 0))
     max_step = int(summary["max_step"])
+    output_format = str(summary.get("output_format", "grib2")).lower()
+    suffix = ".ptype.nc" if output_format == "netcdf" else ".ptype.grib2"
     missing: list[str] = []
 
     for member in summary.get("processed_members", []):
-        for step in range(max_step + 1):
-            path = output_root / model / date / time_value / str(member) / f"lfff{_step_token(step)}.ptype.grib2"
+        for step in range(start_step, max_step + 1):
+            path = output_root / model / date / time_value / str(member) / f"lfff{_step_token(step)}{suffix}"
             if not path.exists():
                 missing.append(str(path))
     return missing
@@ -59,14 +62,19 @@ def build_monitoring_status(
     failed = summary.get("failed", {})
     failed_members = sorted(str(member) for member in failed) if isinstance(failed, dict) else []
     max_step = int(summary.get("max_step", -1))
-    expected_steps = max_step + 1
+    start_step = int(summary.get("start_step", 0))
+    expected_steps = max_step - start_step + 1
 
     if failed_members:
+        details: dict[str, object] = {"members": failed_members}
+        failed_categories = summary.get("failed_categories")
+        if isinstance(failed_categories, dict):
+            details["categories"] = {member: failed_categories.get(member, "member_failed") for member in failed_members}
         alerts.append(
             _alert(
                 "failed_members",
                 "One or more ensemble members failed.",
-                details={"members": failed_members},
+                details=details,
             )
         )
 
@@ -129,22 +137,51 @@ def build_monitoring_status(
             )
         )
 
+    probability_products = summary.get("probabilistic_products", {})
+    if isinstance(probability_products, dict) and probability_products.get("enabled") is True:
+        probability_status = str(probability_products.get("status", ""))
+        if probability_status != "ok":
+            probability_details: dict[str, object] = {"status": probability_status}
+            error = probability_products.get("error")
+            if error:
+                probability_details["error"] = str(error)
+            missing_members = probability_products.get("missing_members")
+            if missing_members:
+                probability_details["missing_members"] = missing_members
+            alerts.append(
+                _alert(
+                    "probability_products_failed",
+                    "Requested ensemble probability products were not generated successfully.",
+                    details=probability_details,
+                )
+            )
+
+    retry_stats = summary.get("retry_stats", {})
+    if isinstance(retry_stats, dict) and int(retry_stats.get("exhausted", 0)) > 0:
+        alerts.append(
+            _alert(
+                "fdb_transient_exhausted",
+                "One or more transient FDB operations exhausted the configured retry policy.",
+                details={key: int(retry_stats.get(key, 0)) for key in ("attempts", "retries", "exhausted")},
+            )
+        )
+
     missing_files: list[str] = []
     if check_output_files and processed_members:
         missing_files = _missing_output_files(summary)
         if missing_files:
             preview = missing_files[:10]
-            details: dict[str, object] = {
+            missing_file_details: dict[str, object] = {
                 "count": len(missing_files),
                 "preview": preview,
             }
             if len(missing_files) > len(preview):
-                details["truncated"] = True
+                missing_file_details["truncated"] = True
             alerts.append(
                 _alert(
                     "missing_output_files",
-                    "One or more expected output GRIB files are missing on disk.",
-                    details=details,
+                    "One or more expected member output files are missing on disk.",
+                    details=missing_file_details,
                 )
             )
 

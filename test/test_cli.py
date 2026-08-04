@@ -30,6 +30,8 @@ def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None
             "20260531",
             "--time",
             "1800",
+            "--start-step",
+            "1",
             "--max-step",
             "3",
             "--lookback-days",
@@ -42,9 +44,30 @@ def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None
             "/tmp/summary.json",
             "--monitoring-json",
             "/tmp/monitoring.json",
+            "--output-format",
+            "NetCDF",
+            "--run-id",
+            "run-123",
+            "--event-id",
+            "event-456",
+            "--attempt",
+            "2",
+            "--log-level",
+            "INFO",
+            "--log-format",
+            "json",
+            "--log-file",
+            "/tmp/ptype.log",
+            "--fdb-retries",
+            "3",
+            "--fdb-retry-initial-s",
+            "1.5",
+            "--fdb-retry-max-s",
+            "9",
             "--max-wall-s",
             "900",
             "--no-output-file-check",
+            "--write-probability-products",
             "--no-prefetch",
             "--skip-input-checks",
             "--precip-mask-threshold-mm",
@@ -60,6 +83,7 @@ def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None
             "members": ("000", "001"),
             "date": "20260531",
             "time_value": "1800",
+            "start_step": 1,
             "max_step": 3,
             "lookback_days": 1,
             "chunk_size": 2,
@@ -70,11 +94,38 @@ def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None
             "vertical_cutoff_m": 12000.0,
             "summary_json": Path("/tmp/summary.json"),
             "monitoring_json": Path("/tmp/monitoring.json"),
+            "output_format": "netcdf",
+            "run_id": "run-123",
+            "event_id": "event-456",
+            "attempt": 2,
+            "fdb_retries": 3,
+            "fdb_retry_initial_s": 1.5,
+            "fdb_retry_max_s": 9.0,
             "max_wall_s": 900.0,
             "check_output_files": False,
+            "write_probability_products": True,
         }
     ]
     assert json.loads(capsys.readouterr().out) == {"failed": {}, "ok": True}
+
+
+def test_cli_rejects_probability_products_with_grib_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "precip_type_diag",
+            "--model",
+            "ICON-CH2-EPS",
+            "--output-root",
+            str(tmp_path),
+            "--write-probability-products",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 2
 
 
 def test_cli_requires_date_and_time_together(monkeypatch: pytest.MonkeyPatch) -> None:

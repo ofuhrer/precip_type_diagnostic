@@ -38,10 +38,11 @@ Before tagging a release:
    ```
 
    The tested `fdb/5.18:v3` setup uses a uenv-created `.venv-fdb` for `numba`
-   while keeping the FDB site-packages first on `PYTHONPATH`.
+   and `netCDF4` while keeping the FDB site-packages first on `PYTHONPATH`.
 
-4. Re-read at least one smoke-test output GRIB and check `PTYPE` metadata and
-   allowed category codes.
+4. Re-read at least one smoke-test member output and check `PTYPE` metadata,
+   shape, and allowed category codes. For the default smoke test this is a GRIB2
+   file; for `--output-format=netcdf`, inspect the NetCDF `ptype` variable.
 5. Confirm `monitoring.json["ok"]` is `true` and archive `summary.json`,
    `monitoring.json`, command output, and data owner approval with the release
    decision.
@@ -84,10 +85,46 @@ Run inside the documented realtime FDB `uenv` and keep the `uenv` image version
 with the release record. If the FDB image changes, rerun smoke tests before
 promotion.
 
+For DEPL-triggered production, keep cycle selection outside the diagnostic. The
+notification service should call the explicit wrapper with model, date, time,
+and output root:
+
+```bash
+tools/run_depl_cycle.sh ICON-CH2-EPS 20260531 18 /users/$USER/work/ptype-fdb
+```
+
+The wrapper runs the Python module with explicit options for the operational
+product set: all members, `--workers 8`, `--chunk-size 2`,
+`--output-format netcdf`, `--write-probability-products`, JSON INFO logging,
+and three bounded FDB retries. It intentionally does not submit to SLURM or
+choose a partition; scheduling remains owned by DEPL.
+
+For manual Balfrin SLURM smoke, benchmark, or validation jobs, use the generally
+open service-node partition `pp-short` when the expected runtime fits below its
+one-hour limit. Avoid elevated-rights partitions such as `pp-production`,
+`pp-prodntc`, and `pp-dispntc` for development or benchmarking runs; they are
+restricted by group and should not be the default for this project.
+
+Minimal `sbatch` wrapper for a manually submitted DEPL-style cycle:
+
+```bash
+#!/usr/bin/env bash
+#SBATCH --job-name=ptype-diag
+#SBATCH --partition=pp-short
+#SBATCH --time=00:59:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+
+set -euo pipefail
+cd /users/$USER/work/precip_type_diagnostic
+tools/run_depl_cycle.sh "$MODEL" "$DATE" "$TIME" "$OUTPUT_ROOT"
+```
+
 For `fdb/5.18:v3`, create `.venv-fdb` inside the uenv with
-`--system-site-packages`, install `numba`, then install this package with
-`--no-deps`. This preserves the FDB uenv Earthkit, ecCodes, and NumPy packages
-while adding the diagnostic's accelerated backend dependency.
+`--system-site-packages`, install `numba` and `netCDF4`, then install this
+package with `--no-deps`. This preserves the FDB uenv Earthkit, ecCodes, and
+NumPy packages while adding the diagnostic's accelerated backend and NetCDF
+dependencies.
 
 ## Monitoring
 
@@ -95,23 +132,36 @@ Every run writes:
 
 - `<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/summary.json`
 - `<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/monitoring.json`
+- `<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/RUNNING.json`, then either
+  `DONE.json` or `FAILED.json`
 
 `monitoring.json` is the scheduler/dashboard contract. It contains `status`,
 `ok`, `recommended_exit_code`, observed/expected counts, and critical alerts for:
 
 - non-empty `summary.json["failed"]`;
 - requested members with no processed or failed result;
-- processed members whose step count or written GRIB count is not `max_step + 1`;
+- processed members whose step count or written member-output count is not
+  `max_step - start_step + 1`;
 - non-zero fatal data-quality counters for precipitation or active columns;
 - wall-clock runtime above `--max-wall-s`, when configured;
-- missing expected output GRIB files, unless `--no-output-file-check` is used.
+- missing expected member output files, unless `--no-output-file-check` is used.
+- failed requested probability-product generation, when
+  `--write-probability-products` is used.
+- exhausted transient FDB retries.
 
 The CLI exits with `monitoring.json["recommended_exit_code"]`, so any critical
 monitoring alert produces a non-zero process exit. Use `--monitoring-json` to
 write an extra copy to a scheduler-specific location. The Python logger
-`precip_type_diag.operational` emits run start, discovery, per-step progress,
-member failure, member completion, and run completion records; route these logs
-and the monitoring JSON into the normal batch scheduler or monitoring system.
+`precip_type_diag.operational` emits run start, discovery, retries, per-step
+progress, member failure, member completion, probability generation, and run
+completion records. Use `--log-format json` for machine ingestion and route the
+logs plus monitoring JSON into the normal batch scheduler or monitoring system.
+
+FDB retries are deliberately narrow: they cover transient `fdb-utils list`, FDB
+field retrieval, and field materialization/decode failures. Deterministic
+science or validation failures, incomplete FDB contents after successful
+listing, invalid shapes, invalid category codes, and strict probability
+completeness failures are not retried.
 
 ## Rollback
 

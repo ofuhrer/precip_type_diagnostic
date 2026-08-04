@@ -29,7 +29,7 @@ containers, or public mirrors that include `background/`.
 
 `src/precip_type_diag/definitions/` contains the local ecCodes overlay required
 to encode the `PTYPE` parameter used by this package. Changes to these files
-affect the output GRIB contract and require operational review.
+affect GRIB2 member output encoding and require operational review.
 
 ## Release Records
 

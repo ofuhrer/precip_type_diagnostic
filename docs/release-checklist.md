@@ -36,6 +36,11 @@ coverage threshold.
 
 Run one smoke test for each operational model:
 
+If the smoke test is submitted through SLURM, use the generally open `pp-short`
+partition and keep the requested wall time below one hour. Do not use restricted
+elevated-rights partitions such as `pp-production`, `pp-prodntc`, or
+`pp-dispntc` for release-candidate smoke tests.
+
 ```bash
 uenv run --view=realtime fdb/5.18:v3 -- \
   env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
@@ -56,8 +61,32 @@ Record:
 - CH2 `summary.json`:
 - CH2 `monitoring.json`:
 
-Required result: `monitoring.json["ok"]` is `true`; at least one output GRIB is
-re-read and checked for `PTYPE` metadata and allowed category codes.
+Required result: `monitoring.json["ok"]` is `true`; at least one member output
+file is re-read and checked for `PTYPE` metadata/variable shape and allowed
+category codes.
+
+## DEPL-Style Production Smoke
+
+Run one explicit-cycle smoke with the wrapper used by DEPL:
+
+```bash
+tools/run_depl_cycle.sh ICON-CH2-EPS YYYYMMDD HH /users/$USER/work/ptype-fdb-depl-smoke --members 000 --max-step 1
+```
+
+If submitted through SLURM, use the generally open `pp-short` partition unless
+the expected runtime requires a longer generally open queue.
+
+Record:
+
+- Wrapper command:
+- JSON log location:
+- `summary.json`:
+- `monitoring.json`:
+- `DONE.json` or `FAILED.json`:
+
+Required result: JSON logs are parseable, `RUNNING.json` is removed at the end,
+`DONE.json` exists, `FAILED.json` does not exist, `monitoring.json["ok"]` is
+`true`, and the probability NetCDF output for the tested step exists.
 
 ## Tagging
 

@@ -4,8 +4,10 @@ Categorical precipitation-type diagnostic for MeteoSwiss `ICON-CH1-EPS` and
 `ICON-CH2-EPS`.
 
 The production path reads the required model fields from realtime FDB on
-Balfrin and writes one categorical GRIB2 `PTYPE` field per member and forecast
-hour, plus a `summary.json`.
+Balfrin and writes one categorical `PTYPE` field per member and forecast hour,
+plus `summary.json` and `monitoring.json`. GRIB2 is the default member output
+format; NetCDF can be selected explicitly and is required for optional
+probability products.
 
 This repository intentionally contains only the FDB production path. There is
 no file-based input mode and no bundled GRIB fixture data.
@@ -95,7 +97,7 @@ runtime pieces into `.venv-fdb` so those uenv packages are not replaced:
 uenv run --view=realtime fdb/5.18:v3 -- bash -lc '
   python -m venv --system-site-packages .venv-fdb
   .venv-fdb/bin/python -m pip install --upgrade pip setuptools wheel
-  .venv-fdb/bin/python -m pip install "numba>=0.65,<0.66"
+  .venv-fdb/bin/python -m pip install "numba>=0.65,<0.66" "netCDF4>=1.7,<1.8"
   .venv-fdb/bin/python -m pip install --no-deps -e .
 '
 ```
@@ -123,7 +125,6 @@ uenv run --view=realtime fdb/5.18:v3 -- \
   .venv-fdb/bin/python -m precip_type_diag \
   --model ICON-CH2-EPS \
   --members all \
-  --workers 4 \
   --output-root /users/$USER/work/ptype-fdb
 ```
 
@@ -135,7 +136,6 @@ uenv run --view=realtime fdb/5.18:v3 -- \
   .venv-fdb/bin/python -m precip_type_diag \
   --model ICON-CH1-EPS \
   --members all \
-  --workers 4 \
   --output-root /users/$USER/work/ptype-fdb
 ```
 
@@ -150,6 +150,19 @@ uenv run --view=realtime fdb/5.18:v3 -- \
   --max-step 1 \
   --output-root /users/$USER/work/ptype-fdb-smoke
 ```
+
+DEPL-style production runs should pass an explicit cycle from the upstream
+notification service and use the wrapper in `tools/`:
+
+```bash
+tools/run_depl_cycle.sh ICON-CH2-EPS 20260531 18 /users/$USER/work/ptype-fdb
+```
+
+The wrapper loads the realtime FDB uenv, uses all members, `--workers 8`,
+`--chunk-size 2`, `--output-format netcdf`, `--write-probability-products`,
+JSON INFO logs, and three bounded FDB retries. It does not submit to SLURM or
+choose a queue; schedule it from DEPL or `sbatch` on a generally open partition
+such as `pp-short` when the runtime fits below the queue limit.
 
 Run a fixed FDB cycle instead of discovering the latest complete cycle:
 
@@ -174,52 +187,105 @@ Prefetching is enabled by default. Disable it only for debugging or comparison:
 Useful CLI options:
 
 - `--members all` or `--members 000,001`
+- `--start-step N` to choose the first diagnosed lead time; default is `1`
+  because step 0 has no preceding hourly precipitation interval
 - `--max-step N` to limit lead times for smoke tests
-- `--workers N` for member-level process parallelism
+- `--workers N` for member-level process parallelism; default is `8`
 - `--chunk-size N` for forecast-hour retrieval chunks
 - `--summary-json /path/to/summary.json` for an extra summary copy
 - `--monitoring-json /path/to/monitoring.json` for an extra machine-readable
   monitoring status copy
+- `--run-id`, `--event-id`, and `--attempt` to record production trigger
+  metadata in summaries and marker files
+- `--log-level`, `--log-format text|json`, and `--log-file` for operational
+  logging
+- `--fdb-retries`, `--fdb-retry-initial-s`, and `--fdb-retry-max-s` for bounded
+  retries of transient FDB list/retrieve/decode failures
 - `--max-wall-s N` to make monitoring fail if wall-clock runtime exceeds `N`
   seconds
-- `--no-output-file-check` to skip post-run existence checks for expected GRIBs
+- `--output-format grib2|netcdf`; default is `grib2`
+- `--no-output-file-check` to skip post-run existence checks for expected member
+  output files
+- `--write-probability-products` to write diagnostic member fields and strict
+  all-member ensemble probability NetCDF products; requires
+  `--output-format=netcdf`
 - `--skip-input-checks` to skip FDB completeness checks
 - `--precip-mask-threshold-mm X` to require at least `X` mm/h before diagnosing
 
 ## Outputs
 
-The default output layout is:
+The default GRIB2 output layout is:
 
 ```text
 <output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/<member>/lfffDDHHMMSS.ptype.grib2
 <output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/summary.json
 <output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/monitoring.json
+<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/DONE.json or FAILED.json
 ```
+
+With `--output-format=netcdf`, the member output layout is:
+
+```text
+<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/<member>/lfffDDHHMMSS.ptype.nc
+<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/summary.json
+<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/monitoring.json
+```
+
+With `--output-format=netcdf --write-probability-products`, the member NetCDF
+files include diagnostic variables and the run also writes:
+
+```text
+<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/probabilities/lfffDDHHMMSS.ptype_prob.nc
+```
+
+Member NetCDF files always contain `ptype`. When probability products are
+enabled they also contain `hourly_precip_mm`, microphysics-consistent per-type
+probabilities in percent, and thresholded hourly-precipitation fields using a
+30% probability threshold and 0.01 mm/h precipitation mask. Final probability
+NetCDF files contain ensemble means of those fields, categorical `PTYPE`
+ensemble frequencies in percent, valid member count, and ensemble mean hourly
+precipitation.
 
 `summary.json` records:
 
 - selected model, run date/time, members, worker count, chunk size, prefetch mode
 - failed members, if any
-- per-member output counts, active-column counts, retained vertical levels, and
-  timing breakdowns
+- per-member output counts, active-column counts, retained vertical levels,
+  forecast-hour chunk counts, FDB request counts, and timing breakdowns
 - aggregate data-quality counters for non-finite precipitation, profile, and
   ground-temperature values
 - runtime provenance: Python/platform metadata, dependency versions, Git commit,
   branch, dirty-worktree flag, and command-line arguments when available
 - monitoring status and alerts
-- aggregate timing fields for FDB requests, decode, diagnosis, and writing
+- aggregate timing fields for FDB checks, static-field retrieval, dynamic FDB
+  requests split by field group, decode split by field group, diagnosis, and
+  writing
+- selected member output format
+- production run metadata: run id, event id, attempt, hostname, user, PID, and
+  SLURM job metadata when present
+- retry policy and retry counters for FDB operations
+- probability-product status, format, thresholds, product names, and output
+  directory; enabled probability runs also report preflight, NetCDF read,
+  aggregation, write, publish, and wall timings
 
 `monitoring.json` is a compact status file for batch schedulers and dashboards.
 It reports `status`, `ok`, `recommended_exit_code`, and critical alerts for
 failed members, missing member results, incomplete member output counts,
 fatal active-column data-quality counters, exceeded `--max-wall-s`, and missing
-expected output GRIB files. The CLI returns the monitoring
+expected member output files. Requested probability-product failures are also
+critical when `--write-probability-products` is used. The CLI returns the monitoring
 `recommended_exit_code`, so critical monitoring alerts result in a non-zero
 process exit.
 
-For a successful full `ICON-CH2-EPS` run, expect `21 * 121 = 2541` GRIB output
-files. A measured full CH2 run on Balfrin with `--workers 4` and default
-prefetching took about 16 minutes wall-clock.
+Runs also write atomic state markers in the run directory. `RUNNING.json` is
+created when member processing starts. It is replaced by `DONE.json` if
+monitoring is OK, or by `FAILED.json` if monitoring is critical. Reruns replace
+products, summaries, monitoring files, and markers atomically.
+
+For a successful default full `ICON-CH2-EPS` run, expect `21 * 120 = 2520` GRIB
+output files. Two measured CH2 step-1-to-24 Balfrin runtime matrices found
+`--workers 8 --chunk-size 2` with default prefetching to be the fastest tested
+GRIB2 configuration.
 
 ## Troubleshooting
 

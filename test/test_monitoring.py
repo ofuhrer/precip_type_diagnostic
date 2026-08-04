@@ -78,3 +78,48 @@ def test_monitoring_status_can_check_output_files(tmp_path: Path) -> None:
     assert status["ok"] is False
     assert status["observed"]["missing_output_files"] == 1
     assert status["alerts"][0]["code"] == "missing_output_files"
+
+
+def test_monitoring_status_checks_netcdf_output_files(tmp_path: Path) -> None:
+    summary = _summary(tmp_path)
+    summary["output_format"] = "netcdf"
+    output = tmp_path / "ICON-CH2-EPS" / "20260531" / "1800" / "000"
+    output.mkdir(parents=True)
+    (output / "lfff00000000.ptype.nc").write_bytes(b"netcdf")
+
+    status = build_monitoring_status(summary, check_output_files=True)
+
+    assert status["ok"] is False
+    assert status["observed"]["missing_output_files"] == 1
+    assert status["alerts"][0]["code"] == "missing_output_files"
+
+
+def test_monitoring_status_reports_requested_probability_failure(tmp_path: Path) -> None:
+    summary = _summary(tmp_path)
+    summary["probabilistic_products"] = {
+        "enabled": True,
+        "status": "failed",
+        "missing_members": ["001"],
+        "error": "failed members: 001",
+    }
+
+    status = build_monitoring_status(summary)
+
+    assert status["ok"] is False
+    assert status["alerts"][0]["code"] == "probability_products_failed"
+    assert status["alerts"][0]["details"] == {
+        "status": "failed",
+        "error": "failed members: 001",
+        "missing_members": ["001"],
+    }
+
+
+def test_monitoring_status_reports_exhausted_fdb_retries(tmp_path: Path) -> None:
+    summary = _summary(tmp_path)
+    summary["retry_stats"] = {"attempts": 4, "retries": 2, "exhausted": 1}
+
+    status = build_monitoring_status(summary)
+
+    assert status["ok"] is False
+    assert status["alerts"][0]["code"] == "fdb_transient_exhausted"
+    assert status["alerts"][0]["details"] == {"attempts": 4, "retries": 2, "exhausted": 1}
