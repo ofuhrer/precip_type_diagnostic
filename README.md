@@ -1,16 +1,17 @@
 # precip_type_diag
 
 `precip_type_diag` diagnoses the precipitation type at the surface for the
-MeteoSwiss `ICON-CH1-EPS` and `ICON-CH2-EPS` ensemble models.
+MeteoSwiss `ICON-CH1-EPS` and `ICON-CH2-EPS` ensemble forecasts and the
+deterministic `ICON-REA-L-CH1` reanalysis.
 
-For each requested ensemble member and forecast hour, it reads model fields
+For each requested member and forecast hour, it reads model fields
 from MeteoSwiss FDB and writes one categorical `PTYPE` field. Every run also
 writes a human- and machine-readable summary, monitoring status, and a final
 run marker.
 
 The project is intentionally narrow:
 
-- production input comes only from the realtime FDB on Balfrin;
+- input comes from the `realtime` or `rea-l-ch1` FDB view on Balfrin;
 - member output is GRIB2 by default and can be NetCDF;
 - optional NetCDF probability products are aggregated across every requested
   member;
@@ -35,8 +36,8 @@ Choose the path that matches what you need:
 | Prepare or operate a release | [Release and operations](docs/release-and-operations.md) |
 
 A local checkout can run all automated checks without FDB access. Running the
-diagnostic itself requires a Balfrin account, access to the realtime FDB, and
-the MeteoSwiss FDB `uenv`.
+diagnostic itself requires a Balfrin account, access to the selected FDB view,
+and the MeteoSwiss FDB `uenv`.
 
 ## Key Terms
 
@@ -49,6 +50,8 @@ the MeteoSwiss FDB `uenv`.
   accumulated-precipitation fields.
 - **Balfrin**: the MeteoSwiss system on which the realtime FDB environment is
   available.
+- **FDB view**: the uenv configuration selecting either rolling forecasts
+  (`realtime`) or the 2005–2025 reanalysis archive (`rea-l-ch1`).
 
 ## Local Development Setup
 
@@ -155,6 +158,33 @@ To smoke-test the ICON-adapted path, append `--algorithm icon`. That mode also
 checks and retrieves the archived `RAIN_GSP`, `SNOW_GSP`, and `GRAU_GSP`
 accumulations.
 
+### REA-L-CH1 day
+
+REA-L-CH1 uses a separate FDB view and is deterministic. Select one archived
+day explicitly; its only cycle is `0000` and its hourly steps are `0..24`:
+
+```bash
+/usr/bin/uenv run --view=rea-l-ch1 fdb/5.21:v1 -- \
+  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
+  .venv-fdb-5.21/bin/python -m precip_type_diag \
+  --model ICON-REA-L-CH1 \
+  --date 20100101 \
+  --time 0000 \
+  --max-step 1 \
+  --output-root /users/$USER/work/ptype-fdb-rea-l-smoke
+```
+
+Run the same command once with the default Firdewsa mode and once with
+`--algorithm icon`. The reanalysis contains all core fields and the three
+archived grid-scale microphysics accumulations required by the offline
+ICON-like mode.
+
+`TOT_PREC`, `RAIN_GSP`, `SNOW_GSP`, and `GRAU_GSP` are accumulated from the
+start of each daily 00 UTC cycle through step 24. The diagnostic differences
+consecutive accumulations within that day and never carries an accumulation
+across the day boundary. `--date` and `--time 0000` are therefore mandatory
+for this model.
+
 ## Production Runs
 
 ### Latest complete cycle
@@ -172,6 +202,8 @@ This example runs every `ICON-CH2-EPS` member and forecast hour and writes GRIB2
 
 Use `--model ICON-CH1-EPS` for CH1. The defaults are 21 members and 120
 forecast hours for CH2, or 11 members and 33 forecast hours for CH1.
+`ICON-REA-L-CH1` is a one-member, 24-hour daily dataset and must be run inside
+the `rea-l-ch1` view with an explicit date and `--time 0000`.
 
 ### Explicit production cycle with probability products
 
@@ -260,6 +292,8 @@ Run `python -m precip_type_diag --help` for the complete CLI reference. The
 options most useful for first runs are:
 
 - `--members all` or `--members 000,001`
+- `--model ICON-REA-L-CH1` selects the deterministic reanalysis; only member
+  `000` is valid and `--date YYYYMMDD --time 0000` are required
 - `--algorithm firdewsa|icon`; default `firdewsa`
 - `--max-step N` to shorten a smoke test
 - `--workers N` to change member-level parallelism; default `8`

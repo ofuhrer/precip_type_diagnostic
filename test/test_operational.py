@@ -16,10 +16,13 @@ from precip_type_diag.operational import (
     FdbTransientError,
     RetryStats,
     Timings,
+    _base_request,
     _check_complete_run,
     _fdb_utils_list,
     _fields_by_step,
+    _filter_parts,
     _has_complete_param,
+    _make_run,
     _materialize_fields,
     _member_keys,
     _ml_fields_by_step,
@@ -88,6 +91,36 @@ def test_parse_members_rejects_unknown_model_members() -> None:
         parse_members("011", "ICON-CH1-EPS")
     with pytest.raises(ValueError, match=r"Duplicate member\(s\): 000"):
         parse_members("000,000", "ICON-CH1-EPS")
+
+    assert parse_members("all", "ICON-REA-L-CH1") == ("000",)
+    with pytest.raises(ValueError, match="not available"):
+        parse_members("001", "ICON-REA-L-CH1")
+
+
+def test_reanalysis_run_uses_rea_l_fdb_identity() -> None:
+    run = _make_run("ICON-REA-L-CH1", "000", "20100101", "0000", 24)
+
+    assert _base_request(run) == {
+        "class": "rd",
+        "expver": "r001",
+        "stream": "reanl",
+        "model": "icon-rea-l-ch1",
+        "type": "cf",
+        "date": "20100101",
+        "time": "0000",
+    }
+    assert _filter_parts(
+        model="ICON-REA-L-CH1",
+        member="000",
+        date="20100101",
+        time_value="0000",
+        param=INPUT_PARAM_IDS["TOT_PREC"],
+        levtype="sfc",
+        step="0/to/24/by/1",
+    ) == (
+        "class=rd,stream=reanl,expver=r001,model=icon-rea-l-ch1,type=cf,"
+        "date=20100101,time=0000,param=500041,levtype=sfc,step=0/to/24/by/1"
+    )
 
 
 def test_validate_run_date_time() -> None:
@@ -439,9 +472,15 @@ def test_process_chunk_rejects_probability_products_with_grib_output(tmp_path: P
 
 
 def test_has_complete_param_checks_steps_levels_and_timespan(monkeypatch: pytest.MonkeyPatch) -> None:
+    filters: list[str] = []
+
+    def fake_list(expr, **kwargs):
+        filters.append(expr)
+        return {"timespan": ["none"], "step": ["0", "1h"], "levelist": [1, 2, 3]}
+
     monkeypatch.setattr(
         "precip_type_diag.operational._fdb_utils_list",
-        lambda expr, **kwargs: {"timespan": ["none"], "step": ["0", "1h"], "levelist": [1, 2, 3]},
+        fake_list,
     )
 
     assert _has_complete_param(
@@ -474,6 +513,25 @@ def test_has_complete_param_checks_steps_levels_and_timespan(monkeypatch: pytest
         levtype="ml",
         timespan="none",
         expected_steps={0, 2},
+    )
+    assert "step=0/to/1/by/1" in filters[0]
+
+
+def test_reanalysis_completeness_does_not_require_unindexed_timespan(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "precip_type_diag.operational._fdb_utils_list",
+        lambda expr, **kwargs: {"step": ["0", "1"], "levelist": [1, 2]},
+    )
+
+    assert _has_complete_param(
+        model="ICON-REA-L-CH1",
+        member="000",
+        date="20100101",
+        time_value="0000",
+        param=INPUT_PARAM_IDS["TOT_PREC"],
+        levtype="sfc",
+        timespan="fs",
+        expected_steps={0, 1},
     )
 
 
@@ -546,6 +604,9 @@ def test_config_for_model_rejects_invalid_values() -> None:
     icon_config = config_for_model("ICON-CH1-EPS", algorithm="icon")
     assert icon_config.algorithm == "icon"
     assert icon_config.precip_mask_threshold_mm == 0.01
+    reanalysis_config = config_for_model("ICON-REA-L-CH1")
+    assert reanalysis_config.members == ("000",)
+    assert reanalysis_config.max_step == 24
 
     with pytest.raises(ValueError, match="Unsupported model"):
         config_for_model("ICON-CH3-EPS")
@@ -582,6 +643,54 @@ def test_run_operational_rejects_invalid_fixed_run(tmp_path: Path) -> None:
             time_value="1800",
             output_root=tmp_path,
         )
+
+
+def test_run_operational_requires_daily_reanalysis_cycle(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires an explicit --date and --time=0000"):
+        run_operational(model="ICON-REA-L-CH1", output_root=tmp_path)
+
+    with pytest.raises(ValueError, match="daily 00 UTC dataset"):
+        run_operational(
+            model="ICON-REA-L-CH1",
+            date="20100101",
+            time_value="0100",
+            output_root=tmp_path,
+        )
+
+
+def test_run_operational_records_reanalysis_source_contract(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("precip_type_diag.operational._configure_meteoswiss_definitions", lambda: None)
+    monkeypatch.setattr("precip_type_diag.operational._warm_diagnostic", lambda: None)
+    monkeypatch.setattr(
+        "precip_type_diag.operational._process_member",
+        lambda **kwargs: {
+            "run": {"member": kwargs["member"]},
+            "steps": 1,
+            "written": 1,
+            "timings_s": {},
+            "wall_s": 0.0,
+        },
+    )
+
+    summary = run_operational(
+        model="ICON-REA-L-CH1",
+        date="20100101",
+        time_value="0000",
+        max_step=1,
+        output_root=tmp_path,
+        workers=1,
+    )
+
+    assert summary["fdb_model"] == "icon-rea-l-ch1"
+    assert summary["members"] == ["000"]
+    assert summary["fdb_source"] == {
+        "uenv_view": "rea-l-ch1",
+        "class": "rd",
+        "stream": "reanl",
+        "expver": "r001",
+        "fixed_time": "0000",
+        "accumulation_contract": "from_0000_daily_cycle_through_step_24",
+    }
 
 
 def test_run_operational_writes_summary_for_fixed_fdb_run(

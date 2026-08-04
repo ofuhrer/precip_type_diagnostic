@@ -12,6 +12,7 @@ from typing import Any
 from .constants import ALGORITHM_FIRDEWSA, DEFAULT_VERTICAL_CUTOFF_M, DIAGNOSTIC_ALGORITHMS
 from .operational import (
     MODEL_MAX_STEP,
+    MODEL_SPECS,
     MODEL_TO_FDB,
     OUTPUT_FORMATS,
     parse_members,
@@ -69,8 +70,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--members", default="all", help="Use 'all' or a comma-separated list like 000,001")
-    parser.add_argument("--date", default=None, help="FDB run date YYYYMMDD. Default: discover latest complete run.")
-    parser.add_argument("--time", dest="time_value", default=None, help="FDB run time HHMM. Default: discover latest complete run.")
+    parser.add_argument(
+        "--date",
+        default=None,
+        help="FDB run date YYYYMMDD. Required for ICON-REA-L-CH1; realtime models discover the latest complete run by default.",
+    )
+    parser.add_argument(
+        "--time",
+        dest="time_value",
+        default=None,
+        help="FDB run time HHMM. ICON-REA-L-CH1 requires 0000; realtime models discover the latest complete run by default.",
+    )
     parser.add_argument("--start-step", type=int, default=1, help="First forecast step to diagnose. Default: 1 because step 0 has no previous hourly precipitation interval.")
     parser.add_argument("--max-step", type=int, default=None)
     parser.add_argument("--lookback-days", type=int, default=2)
@@ -118,6 +128,11 @@ def main() -> int:
             validate_run_date_time(args.date, args.time_value)
         except ValueError as exc:
             parser.error(str(exc))
+    model_spec = MODEL_SPECS[args.model]
+    if model_spec.requires_explicit_cycle and (args.date is None or args.time_value is None):
+        parser.error(f"{args.model} requires --date and --time={model_spec.fixed_time}")
+    if model_spec.fixed_time is not None and args.time_value is not None and args.time_value != model_spec.fixed_time:
+        parser.error(f"{args.model} is a daily 00 UTC dataset; expected --time={model_spec.fixed_time}")
     if args.max_step is not None and args.max_step < 0:
         parser.error(f"--max-step must be non-negative, got {args.max_step}")
     if args.start_step < 0:

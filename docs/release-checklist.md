@@ -9,7 +9,7 @@ Use this checklist for release candidates and accepted operational tags.
 - Git tag:
 - Package version:
 - Python version:
-- Realtime FDB `uenv` image:
+- FDB `uenv` image and tested views:
 - ecCodes definition source:
 - Release owner:
 - Scientific approver:
@@ -81,6 +81,29 @@ category codes.
 
 For dual-mode science or FDB changes, repeat the loop with `--algorithm icon`
 and record `summary.json["algorithm_fidelity"]` for both models.
+
+Run one archived REA-L-CH1 day in its separate view:
+
+```bash
+/usr/bin/uenv run --view=rea-l-ch1 fdb/5.21:v1 -- \
+  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
+  .venv-fdb-5.21/bin/python -m precip_type_diag \
+    --model ICON-REA-L-CH1 \
+    --date 20100101 \
+    --time 0000 \
+    --members 000 \
+    --max-step 1 \
+    --max-wall-s 900 \
+    --output-root /users/$USER/work/ptype-fdb-smoke/ICON-REA-L-CH1
+```
+
+- REA-L-CH1 command output:
+- REA-L-CH1 `summary.json` and `fdb_source`:
+- REA-L-CH1 `monitoring.json`:
+
+Repeat with `--algorithm icon` for dual-mode science or FDB changes. Confirm
+the source contract is `rea-l-ch1`, the cycle is `0000`, and the accumulation
+contract is daily through step 24.
 
 ## DEPL-Style Production Smoke
 

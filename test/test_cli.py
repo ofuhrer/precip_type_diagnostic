@@ -151,6 +151,36 @@ def test_cli_requires_date_and_time_together(monkeypatch: pytest.MonkeyPatch) ->
     assert exc_info.value.code == 2
 
 
+def test_cli_requires_explicit_00_utc_reanalysis_cycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        ["precip_type_diag", "--model", "ICON-REA-L-CH1", "--output-root", "/products"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 2
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "precip_type_diag",
+            "--model",
+            "ICON-REA-L-CH1",
+            "--output-root",
+            "/products",
+            "--date",
+            "20100101",
+            "--time",
+            "0100",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 2
+
+
 def test_cli_rejects_invalid_fixed_run(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "sys.argv",

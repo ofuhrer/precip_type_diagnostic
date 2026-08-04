@@ -11,10 +11,11 @@ and repeat that process for every grid point, member, and forecast hour.
 ## Scope
 
 `precip_type_diag` produces one categorical precipitation-type field per ICON
-ensemble member and forecast hour for:
+member and forecast hour for:
 
 - `ICON-CH1-EPS`
 - `ICON-CH2-EPS`
+- `ICON-REA-L-CH1` (deterministic member `000`)
 
 By default the package writes categorical member `PTYPE` GRIB2 outputs. With
 `--output-format=netcdf`, it writes member `PTYPE` NetCDF outputs instead. With
@@ -53,9 +54,30 @@ The broader method lineage is:
   [MeteoSwiss thesis prototype](https://github.com/MeteoSwiss-APN/precip_diagnostic)
   for code.
 
+## FDB Sources
+
+The model name selects both the model metadata and the expected FDB view:
+
+| CLI model | uenv view | FDB identity | Cycle contract |
+| --- | --- | --- | --- |
+| `ICON-CH1-EPS` | `realtime` | `od/enfo/0001/icon-ch1-eps` | Rolling forecast cycles; latest complete cycle can be discovered |
+| `ICON-CH2-EPS` | `realtime` | `od/enfo/0001/icon-ch2-eps` | Rolling forecast cycles; latest complete cycle can be discovered |
+| `ICON-REA-L-CH1` | `rea-l-ch1` | `rd/reanl/r001/icon-rea-l-ch1` | One deterministic `0000` cycle per day, steps `0..24`; date and time must be explicit |
+
+The REA-L archive spans 2005–2025. Its FDB schema mixes 10-minute and hourly
+steps for some surface variables, so completeness queries always constrain the
+hourly step range. The archive does not expose `timespan` in `fdb-utils` list
+metadata; retrieval still requests `timespan=none` for instantaneous fields and
+`timespan=fs` for accumulated fields, while completeness is checked from the
+explicit step and level inventory.
+
+The realtime FDB inventory contains ICON-CH1-EPS and ICON-CH2-EPS. KENDA-CH1
+shares operational model workflows but is not documented or observed as a
+model in the realtime FDB view and is therefore not exposed by this tool.
+
 ## Input Fields
 
-Both FDB modes fetch these core fields:
+All supported FDB sources fetch these core fields:
 
 | Field | MeteoSwiss `paramId` | Role |
 | --- | ---: | --- |
@@ -84,8 +106,16 @@ The CLI still accepts `--start-step 0` for debugging or compatibility, but that
 output should be treated as a step-0 placeholder rather than a physically
 well-defined hourly precipitation-type diagnostic.
 
+For the realtime forecasts, accumulated fields start at each model forecast
+cycle. For REA-L-CH1, `TOT_PREC` and the grid-scale microphysics fields are
+accumulated from the daily 00 UTC cycle through step 24. The same
+current-minus-previous operation therefore produces hourly amounts in both
+sources, provided REA-L processing stays within a single explicitly selected
+day. The implementation enforces `time=0000` and a maximum step of 24 for
+REA-L-CH1 and never carries an accumulator across daily cycles.
+
 ICON mode additionally requires the accumulated grid-scale microphysics fields
-available in the operational archive:
+available in both reviewed FDB inventories:
 
 | Field | MeteoSwiss `paramId` | Offline use |
 | --- | ---: | --- |
@@ -221,8 +251,10 @@ Important implementation details:
 | --- | --- |
 | CH1 members | `000..010` |
 | CH2 members | `000..020` |
+| REA-L-CH1 members | `000` |
 | CH1 max step | `33` |
 | CH2 max step | `120` |
+| REA-L-CH1 max step | `24` |
 | start step | `1` |
 | worker count | `8` unless overridden |
 | chunk size | `2` forecast hours |
@@ -266,6 +298,20 @@ Real FDB access is checked manually on Balfrin with a smoke run, for example:
 Formal releases should rerun the smoke test from the annotated release tag.
 Run it once with the default Firdewsa mode and once with `--algorithm icon` for
 each model when promoting changes to the dual-mode implementation.
+
+REA-L-CH1 must be checked separately in the archive view with an explicit day:
+
+```bash
+/usr/bin/uenv run --view=rea-l-ch1 fdb/5.21:v1 -- \
+  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
+  .venv-fdb-5.21/bin/python -m precip_type_diag \
+  --model ICON-REA-L-CH1 --date 20100101 --time 0000 \
+  --max-step 1 --output-root /users/$USER/work/ptype-fdb-rea-l-smoke
+```
+
+Run this command with both algorithms. The focused live inventory check should
+also verify all 80 full levels, 81 HHL half levels, and the three accumulated
+grid-scale microphysics fields before release.
 
 For local executable Fortran parity, use an ICON checkout that contains the
 pinned commit:

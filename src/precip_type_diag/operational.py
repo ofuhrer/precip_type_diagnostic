@@ -56,18 +56,58 @@ _ACTIVE_RUN_MARKER: ContextVar[tuple[Path, dict[str, object]] | None] = ContextV
     default=None,
 )
 
-MODEL_TO_FDB = {
-    "ICON-CH1-EPS": "icon-ch1-eps",
-    "ICON-CH2-EPS": "icon-ch2-eps",
+
+@dataclass(frozen=True)
+class FdbModelSpec:
+    fdb_model: str
+    fdb_class: str
+    expver: str
+    stream: str
+    members: tuple[str, ...]
+    max_step: int
+    uenv_view: str
+    fixed_time: str | None = None
+    requires_explicit_cycle: bool = False
+    fdb_utils_reports_timespan: bool = True
+    accumulation_contract: str = "from_start_of_forecast"
+
+
+MODEL_SPECS = {
+    "ICON-CH1-EPS": FdbModelSpec(
+        fdb_model="icon-ch1-eps",
+        fdb_class="od",
+        expver="0001",
+        stream="enfo",
+        members=tuple(f"{member:03d}" for member in range(11)),
+        max_step=33,
+        uenv_view="realtime",
+    ),
+    "ICON-CH2-EPS": FdbModelSpec(
+        fdb_model="icon-ch2-eps",
+        fdb_class="od",
+        expver="0001",
+        stream="enfo",
+        members=tuple(f"{member:03d}" for member in range(21)),
+        max_step=120,
+        uenv_view="realtime",
+    ),
+    "ICON-REA-L-CH1": FdbModelSpec(
+        fdb_model="icon-rea-l-ch1",
+        fdb_class="rd",
+        expver="r001",
+        stream="reanl",
+        members=("000",),
+        max_step=24,
+        uenv_view="rea-l-ch1",
+        fixed_time="0000",
+        requires_explicit_cycle=True,
+        fdb_utils_reports_timespan=False,
+        accumulation_contract="from_0000_daily_cycle_through_step_24",
+    ),
 }
-MODEL_MAX_STEP = {
-    "ICON-CH1-EPS": 33,
-    "ICON-CH2-EPS": 120,
-}
-MODEL_MEMBERS = {
-    "ICON-CH1-EPS": tuple(f"{member:03d}" for member in range(11)),
-    "ICON-CH2-EPS": tuple(f"{member:03d}" for member in range(21)),
-}
+MODEL_TO_FDB = {model: spec.fdb_model for model, spec in MODEL_SPECS.items()}
+MODEL_MAX_STEP = {model: spec.max_step for model, spec in MODEL_SPECS.items()}
+MODEL_MEMBERS = {model: spec.members for model, spec in MODEL_SPECS.items()}
 DEFAULT_OUTPUT_ROOT = Path(os.environ.get("PRECIP_TYPE_DIAG_OUTPUT_ROOT", "/tmp/precip_type_diag"))
 FULL_LEVELS = 80
 HALF_LEVELS = 81
@@ -181,6 +221,9 @@ class FdbRun:
     type: str
     number: int | None
     max_step: int
+    fdb_class: str = "od"
+    expver: str = "0001"
+    stream: str = "enfo"
     discovery_s: float = 0.0
 
 
@@ -455,9 +498,9 @@ def _member_keys(member: str) -> tuple[str, int | None]:
 
 def _base_request(run: FdbRun) -> dict[str, object]:
     request: dict[str, object] = {
-        "class": "od",
-        "expver": "0001",
-        "stream": "enfo",
+        "class": run.fdb_class,
+        "expver": run.expver,
+        "stream": run.stream,
         "model": run.model,
         "type": run.type,
         "date": run.date,
@@ -476,9 +519,17 @@ def _filter_parts(
     time_value: str | None = None,
     param: int | None = None,
     levtype: str | None = None,
+    step: str | None = None,
 ) -> str:
+    spec = MODEL_SPECS[model]
     type_value, number = _member_keys(member)
-    parts = [f"model={MODEL_TO_FDB[model]}", f"type={type_value}"]
+    parts = [
+        f"class={spec.fdb_class}",
+        f"stream={spec.stream}",
+        f"expver={spec.expver}",
+        f"model={spec.fdb_model}",
+        f"type={type_value}",
+    ]
     if number is not None:
         parts.append(f"number={number}")
     if date is not None:
@@ -489,6 +540,8 @@ def _filter_parts(
         parts.append(f"param={param}")
     if levtype is not None:
         parts.append(f"levtype={levtype}")
+    if step is not None:
+        parts.append(f"step={step}")
     return ",".join(parts)
 
 
@@ -557,6 +610,8 @@ def _has_complete_param(
     retry_config: RetryConfig | None = None,
     retry_stats: RetryStats | None = None,
 ) -> bool:
+    ordered_steps = sorted(expected_steps)
+    step_filter = _step_expr(list(range(ordered_steps[0], ordered_steps[-1] + 1)))
     values = _fdb_utils_list(
         _filter_parts(
             model=model,
@@ -565,11 +620,14 @@ def _has_complete_param(
             time_value=time_value,
             param=param,
             levtype=levtype,
+            step=step_filter,
         ),
         retry_config=retry_config,
         retry_stats=retry_stats,
     )
-    if timespan not in {str(value) for value in values.get("timespan", [])}:
+    if MODEL_SPECS[model].fdb_utils_reports_timespan and timespan not in {
+        str(value) for value in values.get("timespan", [])
+    }:
         return False
     if not expected_steps.issubset(_parse_steps(values.get("step", []))):
         return False
@@ -736,15 +794,12 @@ def discover_complete_run(
             )
         except FdbIncompleteError:
             continue
-        type_value, number = _member_keys(member)
-        return FdbRun(
-            date=date,
-            time=time_value,
-            model=MODEL_TO_FDB[model],
-            member=member,
-            type=type_value,
-            number=number,
-            max_step=max_step,
+        return _make_run(
+            model,
+            member,
+            date,
+            time_value,
+            max_step,
             discovery_s=time.perf_counter() - start,
         )
 
@@ -754,16 +809,29 @@ def discover_complete_run(
     )
 
 
-def _make_run(model: str, member: str, date: str, time_value: str, max_step: int) -> FdbRun:
+def _make_run(
+    model: str,
+    member: str,
+    date: str,
+    time_value: str,
+    max_step: int,
+    *,
+    discovery_s: float = 0.0,
+) -> FdbRun:
+    spec = MODEL_SPECS[model]
     type_value, number = _member_keys(member)
     return FdbRun(
         date=date,
         time=time_value,
-        model=MODEL_TO_FDB[model],
+        model=spec.fdb_model,
         member=member,
         type=type_value,
         number=number,
         max_step=max_step,
+        fdb_class=spec.fdb_class,
+        expver=spec.expver,
+        stream=spec.stream,
+        discovery_s=discovery_s,
     )
 
 
@@ -1680,12 +1748,14 @@ def _collect_run_metadata(
     }
 
 
-def _algorithm_fidelity(algorithm: str) -> dict[str, object]:
+def _algorithm_fidelity(algorithm: str, model: str) -> dict[str, object]:
+    spec = MODEL_SPECS[model]
     if algorithm == ALGORITHM_FIRDEWSA:
         return {
             "mode": "original_firdewsa",
             "reference": "Zukanovic MSc thesis implementation",
             "online_alignment": "not_applicable",
+            "fdb_view": spec.uenv_view,
         }
     return {
         "mode": "icon_adapted_partial_archive",
@@ -1695,7 +1765,8 @@ def _algorithm_fidelity(algorithm: str) -> dict[str, object]:
         "unavailable_online_rate_components": [name.lower() for name in ICON_UNAVAILABLE_ONLINE_RATE_COMPONENTS],
         "surface_rate_derivation": "hourly_difference_of_archived_accumulations_kg_m-2_s-1",
         "exact_online_refinement_parity": False,
-        "limitation": "convective rain/snow and hail rates used online are not archived in the operational FDB inventory",
+        "fdb_view": spec.uenv_view,
+        "limitation": "convective rain/snow and hail rates used online are not archived in the selected FDB dataset",
     }
 
 
@@ -1763,6 +1834,11 @@ def run_operational(
         prefetch=prefetch,
         output_format=normalized_output_format,
     )
+    spec = MODEL_SPECS[model]
+    if spec.requires_explicit_cycle and (date is None or time_value is None):
+        raise ValueError(f"{model} requires an explicit --date and --time={spec.fixed_time}")
+    if spec.fixed_time is not None and time_value is not None and time_value != spec.fixed_time:
+        raise ValueError(f"{model} is a daily 00 UTC dataset; expected time_value={spec.fixed_time}, got {time_value}")
     _configure_meteoswiss_definitions()
     if config.algorithm == ALGORITHM_ICON:
         _warm_diagnostic(config.algorithm)
@@ -1905,6 +1981,14 @@ def run_operational(
     summary: dict[str, object] = {
         "model": model,
         "fdb_model": MODEL_TO_FDB[model],
+        "fdb_source": {
+            "uenv_view": spec.uenv_view,
+            "class": spec.fdb_class,
+            "stream": spec.stream,
+            "expver": spec.expver,
+            "fixed_time": spec.fixed_time,
+            "accumulation_contract": spec.accumulation_contract,
+        },
         "date": date,
         "time": time_value,
         "members": list(config.members),
@@ -1920,7 +2004,7 @@ def run_operational(
         "output_root": str(config.output_root),
         "output_format": config.output_format,
         "diagnostic_algorithm": config.algorithm,
-        "algorithm_fidelity": _algorithm_fidelity(config.algorithm),
+        "algorithm_fidelity": _algorithm_fidelity(config.algorithm, model),
         "precip_mask_threshold_mm": config.precip_mask_threshold_mm,
         "vertical_cutoff_m": config.vertical_cutoff_m,
         "discovery_s": round(discovery_s, 3),

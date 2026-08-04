@@ -37,7 +37,7 @@ Before tagging a release:
    ```
 
 2. Confirm the GitHub Actions `tests` workflow passes for the release branch.
-3. Run a Balfrin FDB smoke test for each operational model:
+3. Run a Balfrin FDB smoke test for each realtime operational model:
 
    ```bash
    /usr/bin/uenv run --view=realtime fdb/5.21:v1 -- \
@@ -59,6 +59,21 @@ Before tagging a release:
    The tested `fdb/5.21:v1` setup uses the system `/usr/bin/uenv` client and a
    separate `.venv-fdb-5.21` for Numba 0.66 while exposing the FDB image's
    Python packages first on `PYTHONPATH`.
+
+   Also test one explicit REA-L-CH1 day in the archive view:
+
+   ```bash
+   /usr/bin/uenv run --view=rea-l-ch1 fdb/5.21:v1 -- \
+     env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
+     .venv-fdb-5.21/bin/python -m precip_type_diag \
+     --model ICON-REA-L-CH1 --date 20100101 --time 0000 \
+     --members 000 --max-step 1 --max-wall-s 900 \
+     --output-root /users/$USER/work/ptype-fdb-rea-l-smoke
+   ```
+
+   Repeat this command with `--algorithm icon` for dual-mode or FDB changes.
+   Confirm the summary records the `rea-l-ch1` view and the daily accumulation
+   contract.
 
 4. Re-read at least one smoke-test member output and check `PTYPE` metadata,
    shape, and allowed category codes. For the default smoke test this is a GRIB2
@@ -103,9 +118,10 @@ python -m precip_type_diag ...
 precip-type-diag ...
 ```
 
-Run inside the documented realtime FDB `uenv` and keep the `uenv` image version
-with the release record. If the FDB image changes, rerun smoke tests before
-promotion.
+Run inside the documented `realtime` or `rea-l-ch1` FDB uenv view and keep the
+uenv image version with the release record. If the FDB image changes, rerun
+smoke tests before promotion. The DEPL wrapper remains realtime-only; invoke
+the module directly for explicitly dated REA-L-CH1 days.
 
 For DEPL-triggered production, keep cycle selection outside the diagnostic. The
 notification service should call the explicit wrapper with model, date, time,
