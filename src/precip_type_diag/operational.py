@@ -811,6 +811,12 @@ def _step(field: FieldLike) -> int:
         return _parse_step(field.metadata("step"))
 
 
+def _materialize_fields(fieldlist: Iterable[FieldLike]) -> list[FieldLike]:
+    """Consume an Earthkit stream without requesting its unsupported length."""
+
+    return [field for field in fieldlist]
+
+
 def _fields_by_step(fieldlist: Iterable[FieldLike]) -> dict[int, FieldLike]:
     result: dict[int, FieldLike] = {}
     for field in fieldlist:
@@ -898,7 +904,7 @@ def _fetch_hhl(run: FdbRun, timings: Timings, *, retry_config: RetryConfig, retr
     timings.static_request_s += request_s
     timings.static_hhl_request_s += request_s
     start = time.perf_counter()
-    hhl = _stack_level_fields(list(fieldlist), HALF_LEVELS, retry_config=retry_config, retry_stats=retry_stats)
+    hhl = _stack_level_fields(_materialize_fields(fieldlist), HALF_LEVELS, retry_config=retry_config, retry_stats=retry_stats)
     decode_s = time.perf_counter() - start
     timings.static_decode_s += decode_s
     timings.static_hhl_decode_s += decode_s
@@ -923,7 +929,7 @@ def _fetch_total_precip_step(
     fieldlist, request_s = _request_fieldlist(request, retry_config=retry_config, retry_stats=retry_stats)
     timings.static_request_s += request_s
     timings.static_prev_precip_request_s += request_s
-    fields = list(fieldlist)
+    fields = _materialize_fields(fieldlist)
     if len(fields) != 1:
         raise RuntimeError(f"Expected one TOT_PREC field for initialization step {step}, got {len(fields)}")
     start = time.perf_counter()

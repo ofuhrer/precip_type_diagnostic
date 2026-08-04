@@ -10,5 +10,7 @@ def test_collect_runtime_provenance_contains_versions_and_git_state() -> None:
     assert provenance["platform"]["system"]
     assert "numpy" in provenance["package_versions"]
     assert "numba" in provenance["package_versions"]
+    assert "eccodes-cosmo-resources-python" in provenance["package_versions"]
+    assert "eccodes-cosmo-resources-python-internal" in provenance["package_versions"]
     assert "git" in provenance
     assert "argv" in provenance

@@ -9,6 +9,7 @@ from earthkit.data import from_source
 
 from precip_type_diag.constants import OUTPUT_PARAM_ID, OUTPUT_SHORT_NAME
 from precip_type_diag.gribio import (
+    _materialize_field_list,
     bootstrap_eccodes_definitions,
     check_precip_mask_threshold_mm,
     derive_vertical_level_selection,
@@ -45,7 +46,7 @@ def _write_template_grib(path: Path) -> object:
             eccodes.codes_write(handle_id, handle)
     finally:
         eccodes.codes_release(handle_id)
-    return from_source("file", str(path))[0]
+    return _materialize_field_list(from_source("file", str(path)))[0]
 
 
 def test_precip_mask_threshold_check_rejects_negative_or_non_finite() -> None:
@@ -70,6 +71,19 @@ def test_bootstrap_eccodes_definitions_is_idempotent(monkeypatch: pytest.MonkeyP
     assert calls == ["/defs/local:/defs/ms:/eccodes/base"]
 
 
+def test_bootstrap_eccodes_definitions_accepts_embedded_ecmwf_definitions(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr("precip_type_diag.gribio._package_definitions_dir", lambda: Path("/defs/local"))
+    monkeypatch.setattr("precip_type_diag.gribio._candidate_meteoswiss_definition_dirs", lambda: [])
+    monkeypatch.setattr("precip_type_diag.gribio.eccodes.codes_definition_path", lambda: "/MEMFS/definitions")
+    monkeypatch.setattr("precip_type_diag.gribio.eccodes.codes_set_definitions_path", calls.append)
+
+    combined = bootstrap_eccodes_definitions()
+
+    assert combined == "/defs/local:/MEMFS/definitions"
+    assert calls == ["/defs/local:/MEMFS/definitions"]
+
+
 def test_output_grib_metadata_is_stable(tmp_path: Path) -> None:
     bootstrap_eccodes_definitions()
 
@@ -79,7 +93,7 @@ def test_output_grib_metadata_is_stable(tmp_path: Path) -> None:
     output_path = tmp_path / "ptype.grib2"
     write_output_grib(template_field, np.array([[13, 1], [5, 8]], dtype=np.int32), output_path)
 
-    output_field = from_source("file", str(output_path))[0]
+    output_field = _materialize_field_list(from_source("file", str(output_path)))[0]
     assert output_field.metadata("paramId") in {OUTPUT_PARAM_ID, 260015}
     assert output_field.metadata("shortName") in {OUTPUT_SHORT_NAME, "ptype"}
     assert output_field.metadata("discipline") == 0

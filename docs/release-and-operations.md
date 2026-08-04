@@ -40,9 +40,9 @@ Before tagging a release:
 3. Run a Balfrin FDB smoke test for each operational model:
 
    ```bash
-   uenv run --view=realtime fdb/5.18:v3 -- \
+   /usr/bin/uenv run --view=realtime fdb/5.21:v1 -- \
      env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-     .venv-fdb/bin/python -m precip_type_diag \
+     .venv-fdb-5.21/bin/python -m precip_type_diag \
      --model ICON-CH2-EPS \
      --members 000 \
      --max-step 1 \
@@ -56,8 +56,9 @@ Before tagging a release:
    graupel accumulations pass completeness checks. The
    [release checklist](release-checklist.md) provides a loop that runs both models.
 
-   The tested `fdb/5.18:v3` setup uses a uenv-created `.venv-fdb` for `numba`
-   and `netCDF4` while keeping the FDB site-packages first on `PYTHONPATH`.
+   The tested `fdb/5.21:v1` setup uses the system `/usr/bin/uenv` client and a
+   separate `.venv-fdb-5.21` for Numba 0.66 while exposing the FDB image's
+   Python packages first on `PYTHONPATH`.
 
 4. Re-read at least one smoke-test member output and check `PTYPE` metadata,
    shape, and allowed category codes. For the default smoke test this is a GRIB2
@@ -141,11 +142,14 @@ cd /users/$USER/work/precip_type_diagnostic
 tools/run_depl_cycle.sh "$MODEL" "$DATE" "$TIME" "$OUTPUT_ROOT"
 ```
 
-For `fdb/5.18:v3`, create `.venv-fdb` inside the uenv with
-`--system-site-packages`, install `numba` and `netCDF4`, then install this
-package with `--no-deps`. This preserves the FDB uenv Earthkit, ecCodes, and
-NumPy packages while adding the diagnostic's accelerated backend and NetCDF
-dependencies.
+For `fdb/5.21:v1`, use `/usr/bin/uenv` version 8 or newer and create
+`.venv-fdb-5.21` inside the uenv. Install Numba 0.66 and this package with
+`--no-deps`, then run `pip check` with the documented FDB site-packages on
+`PYTHONPATH`. The FDB image's Python environment cannot be inherited by a
+nested venv through `--system-site-packages`. This arrangement preserves the
+reviewed FDB uenv stack—Python 3.11, NumPy 2.4, Earthkit 1.0, ecCodes 2.47, and
+NetCDF4 1.7—while adding the accelerated diagnostic backend. A legacy
+user-installed `activate-uenv` must not shadow `/usr/bin/uenv`.
 
 ## Monitoring
 

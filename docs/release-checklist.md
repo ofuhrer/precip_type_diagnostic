@@ -55,9 +55,9 @@ elevated-rights partitions such as `pp-production`, `pp-prodntc`, or
 
 ```bash
 for model in ICON-CH1-EPS ICON-CH2-EPS; do
-  uenv run --view=realtime fdb/5.18:v3 -- \
+  /usr/bin/uenv run --view=realtime fdb/5.21:v1 -- \
     env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-    .venv-fdb/bin/python -m precip_type_diag \
+    .venv-fdb-5.21/bin/python -m precip_type_diag \
       --model "$model" \
       --members 000 \
       --max-step 1 \

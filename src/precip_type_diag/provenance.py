@@ -16,6 +16,7 @@ DEPENDENCY_DISTRIBUTIONS = (
     "earthkit-data",
     "eccodes",
     "eccodes-cosmo-resources-python",
+    "eccodes-cosmo-resources-python-internal",
 )
 
 

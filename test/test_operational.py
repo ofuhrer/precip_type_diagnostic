@@ -20,6 +20,7 @@ from precip_type_diag.operational import (
     _fdb_utils_list,
     _fields_by_step,
     _has_complete_param,
+    _materialize_fields,
     _member_keys,
     _ml_fields_by_step,
     _parse_step,
@@ -47,6 +48,19 @@ class FakeField:
         if flatten:
             return self._values.reshape(-1)
         return self._values
+
+
+def test_materialize_fields_does_not_request_stream_length() -> None:
+    fields = [FakeField({"step": "1"}), FakeField({"step": "2"})]
+
+    class LengthlessStream:
+        def __iter__(self):
+            return iter(fields)
+
+        def __len__(self):
+            raise NotImplementedError("StreamFieldList does not support __len__")
+
+    assert _materialize_fields(LengthlessStream()) == fields
 
 
 def test_member_and_step_helpers() -> None:

@@ -25,5 +25,9 @@ def test_depl_script_uses_explicit_production_options() -> None:
     assert "--write-probability-products" in text
     assert "--log-format json" in text
     assert "--fdb-retries 3" in text
+    assert "fdb/5.21:v1" in text
+    assert "/usr/bin/uenv" in text
+    assert ".venv-fdb-5.21/bin/python" in text
+    assert "fdb/5.18" not in text
     assert "#SBATCH" not in text
     assert "pp-production" not in text

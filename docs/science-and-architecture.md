@@ -254,9 +254,9 @@ The test suite covers four areas:
 Real FDB access is checked manually on Balfrin with a smoke run, for example:
 
 ```bash
-uenv run --view=realtime fdb/5.18:v3 -- \
+/usr/bin/uenv run --view=realtime fdb/5.21:v1 -- \
   env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-  .venv-fdb/bin/python -m precip_type_diag \
+  .venv-fdb-5.21/bin/python -m precip_type_diag \
   --model ICON-CH2-EPS \
   --members 000 \
   --max-step 1 \

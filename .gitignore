@@ -2,6 +2,7 @@
 
 .venv/
 .venv-fdb/
+.venv-fdb-5.21/
 __pycache__/
 *.pyc
 .pytest_cache/

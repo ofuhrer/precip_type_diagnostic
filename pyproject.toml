@@ -10,11 +10,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
 dependencies = [
-  "numpy>=1.26,<2.4",
-  "numba>=0.65,<0.66",
-  "earthkit-data>=0.18.3,<0.20",
-  "eccodes>=2.38,<2.40",
-  "eccodes-cosmo-resources-python>=2.38.3.1,<2.40",
+  "numpy>=2.4,<2.5",
+  "numba>=0.66,<0.67",
+  "earthkit-data>=1.0,<1.1",
+  "eccodes>=2.47,<2.48",
   "netCDF4>=1.7,<1.8",
 ]
 

@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import tempfile
 from dataclasses import dataclass
+from importlib import metadata
 from pathlib import Path
+from typing import Any
 
 import eccodes
 import numpy as np
@@ -36,8 +38,42 @@ class VerticalLevelSelection:
     retained_full_levels: int
 
 
+def _materialize_field_list(source: Any) -> list[Any]:
+    """Normalize Earthkit 0.x field lists and Earthkit 1.x data sources."""
+
+    to_fieldlist = getattr(source, "to_fieldlist", None)
+    if callable(to_fieldlist):
+        source = to_fieldlist()
+    return list(source)
+
+
 def _package_definitions_dir() -> Path:
     return Path(__file__).resolve().parent / "definitions"
+
+
+def _major_minor(version: str) -> tuple[str, str]:
+    parts = version.split(".")
+    return (parts[0], parts[1]) if len(parts) >= 2 else (version, "")
+
+
+def _cosmo_resources_match_eccodes() -> bool:
+    resource_version: str | None = None
+    for distribution in (
+        "eccodes-cosmo-resources-python-internal",
+        "eccodes-cosmo-resources-python",
+    ):
+        try:
+            resource_version = metadata.version(distribution)
+            break
+        except metadata.PackageNotFoundError:
+            continue
+    if resource_version is None:
+        return True
+    try:
+        eccodes_version = metadata.version("eccodes")
+    except metadata.PackageNotFoundError:
+        return True
+    return _major_minor(resource_version) == _major_minor(eccodes_version)
 
 
 def _candidate_meteoswiss_definition_dirs() -> list[Path]:
@@ -47,6 +83,9 @@ def _candidate_meteoswiss_definition_dirs() -> list[Path]:
         candidates.append(Path(env_dir))
 
     try:
+        if not _cosmo_resources_match_eccodes():
+            raise ImportError("ecCodes COSMO resource version does not match ecCodes")
+
         import eccodes_cosmo_resources
 
         get_path = getattr(eccodes_cosmo_resources, "get_definitions_path", None)
@@ -73,14 +112,17 @@ def bootstrap_eccodes_definitions() -> str:
     local_defs = _package_definitions_dir()
     meteoswiss_defs = _candidate_meteoswiss_definition_dirs()
 
-    if not meteoswiss_defs:
+    current_parts = [part for part in current.split(":") if part]
+    embedded_definitions = any(part.startswith("/MEMFS/") for part in current_parts)
+    if not meteoswiss_defs and not embedded_definitions:
         raise RuntimeError(
-            "Could not locate MeteoSwiss ecCodes definitions. "
-            "Install eccodes-cosmo-resources-python or set PRECIP_TYPE_DIAG_COSMO_DEFS."
+            "Could not locate compatible MeteoSwiss ecCodes definitions. "
+            "Use the MeteoSwiss FDB uenv or set PRECIP_TYPE_DIAG_COSMO_DEFS."
         )
 
-    preferred = [str(local_defs), str(meteoswiss_defs[0])]
-    current_parts = [part for part in current.split(":") if part]
+    preferred = [str(local_defs)]
+    if meteoswiss_defs:
+        preferred.append(str(meteoswiss_defs[0]))
     combined_parts: list[str] = []
     for part in [*preferred, *current_parts]:
         if part not in combined_parts:
@@ -246,7 +288,7 @@ def read_single_grib_message(path: Path) -> GribFieldMessage:
             finally:
                 eccodes.codes_release(extra_message_id)
 
-    fields = list(from_source("file", str(path)))
+    fields = _materialize_field_list(from_source("file", str(path)))
     if len(fields) != 1:
         raise ValueError(f"{path} contains {len(fields)} GRIB fields; expected one")
     values = np.asarray(fields[0].to_numpy(flatten=False))

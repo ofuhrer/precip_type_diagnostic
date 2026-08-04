@@ -55,15 +55,16 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PYTHON_BIN="${PRECIP_TYPE_DIAG_PYTHON:-$REPO_ROOT/.venv-fdb/bin/python}"
-FDB_IMAGE="${PRECIP_TYPE_DIAG_FDB_IMAGE:-fdb/5.18:v3}"
+UENV_BIN="${PRECIP_TYPE_DIAG_UENV:-/usr/bin/uenv}"
+PYTHON_BIN="${PRECIP_TYPE_DIAG_PYTHON:-$REPO_ROOT/.venv-fdb-5.21/bin/python}"
+FDB_IMAGE="${PRECIP_TYPE_DIAG_FDB_IMAGE:-fdb/5.21:v1}"
 FDB_SITE_PACKAGES="${PRECIP_TYPE_DIAG_FDB_SITE_PACKAGES:-/user-environment/venvs/fdb/lib/python3.11/site-packages}"
 RUN_ID="${PRECIP_TYPE_DIAG_RUN_ID:-${MODEL}-${DATE}-${TIME_VALUE}}"
 ATTEMPT="${PRECIP_TYPE_DIAG_ATTEMPT:-1}"
 
 cd "$REPO_ROOT"
 
-exec uenv run --view=realtime "$FDB_IMAGE" -- \
+exec "$UENV_BIN" run --view=realtime "$FDB_IMAGE" -- \
   env PYTHONPATH="${FDB_SITE_PACKAGES}:src${PYTHONPATH:+:${PYTHONPATH}}" \
   "$PYTHON_BIN" -m precip_type_diag \
   --model "$MODEL" \

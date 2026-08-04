@@ -93,34 +93,54 @@ Create a virtual environment inside the realtime FDB `uenv`. The uenv supplies
 FDB, Earthkit, ecCodes, and NumPy; the commands below add the remaining runtime
 packages without replacing the uenv versions:
 
+Use the system `uenv` client. Version 8 or newer is required for the
+Stackinator-v2 metadata in `fdb/5.21:v1`:
+
 ```bash
-uenv run --view=realtime fdb/5.18:v3 -- bash -lc '
-  python -m venv --system-site-packages .venv-fdb
-  .venv-fdb/bin/python -m pip install --upgrade pip setuptools wheel
-  .venv-fdb/bin/python -m pip install "numba>=0.65,<0.66" "netCDF4>=1.7,<1.8"
-  .venv-fdb/bin/python -m pip install --no-deps -e .
+command -v uenv
+/usr/bin/uenv --version
+```
+
+If `command -v uenv` reports a shell function from a user-installed
+`activate-uenv`, disable that legacy activation or invoke `/usr/bin/uenv`
+explicitly as shown below.
+
+```bash
+/usr/bin/uenv run --view=realtime fdb/5.21:v1 -- bash -lc '
+  python -m venv .venv-fdb-5.21
+  .venv-fdb-5.21/bin/python -m pip install --upgrade pip setuptools wheel
+  .venv-fdb-5.21/bin/python -m pip install "numba>=0.66,<0.67" "netCDF4>=1.7,<1.8"
+  .venv-fdb-5.21/bin/python -m pip install --no-deps -e .
+  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages \
+    .venv-fdb-5.21/bin/python -m pip check
 '
 ```
+
+The FDB image stores its Python packages in its own virtual environment, so a
+nested virtual environment cannot inherit them with `--system-site-packages`.
+The documented `PYTHONPATH` exposes the uenv packages while the project venv
+provides Numba and the editable package.
 
 Confirm that the CLI starts in the FDB environment:
 
 ```bash
-uenv run --view=realtime fdb/5.18:v3 -- \
+/usr/bin/uenv run --view=realtime fdb/5.21:v1 -- \
   env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-  .venv-fdb/bin/python -m precip_type_diag --help
+  .venv-fdb-5.21/bin/python -m precip_type_diag --help
 ```
 
-If `fdb/5.18:v3` is no longer available, use `uenv image ls fdb` to find the
-current realtime image and record the selected version with the run.
+`fdb/5.21:v1` is the reviewed production image for this release. If it is no
+longer available, inspect `/usr/bin/uenv image ls`, select the currently
+supported realtime image, and repeat both model smoke tests before promotion.
 
 ## First Balfrin Smoke Test
 
 Start with one member and one forecast hour:
 
 ```bash
-uenv run --view=realtime fdb/5.18:v3 -- \
+/usr/bin/uenv run --view=realtime fdb/5.21:v1 -- \
   env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-  .venv-fdb/bin/python -m precip_type_diag \
+  .venv-fdb-5.21/bin/python -m precip_type_diag \
   --model ICON-CH2-EPS \
   --members 000 \
   --max-step 1 \
@@ -142,9 +162,9 @@ accumulations.
 This example runs every `ICON-CH2-EPS` member and forecast hour and writes GRIB2:
 
 ```bash
-uenv run --view=realtime fdb/5.18:v3 -- \
+/usr/bin/uenv run --view=realtime fdb/5.21:v1 -- \
   env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-  .venv-fdb/bin/python -m precip_type_diag \
+  .venv-fdb-5.21/bin/python -m precip_type_diag \
   --model ICON-CH2-EPS \
   --members all \
   --output-root /users/$USER/work/ptype-fdb
@@ -176,9 +196,9 @@ example are in [Release and operations](docs/release-and-operations.md).
 Use `--date YYYYMMDD` and `--time HHMM` together:
 
 ```bash
-uenv run --view=realtime fdb/5.18:v3 -- \
+/usr/bin/uenv run --view=realtime fdb/5.21:v1 -- \
   env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-  .venv-fdb/bin/python -m precip_type_diag \
+  .venv-fdb-5.21/bin/python -m precip_type_diag \
   --model ICON-CH2-EPS \
   --members 000 \
   --date 20260531 \
@@ -256,8 +276,10 @@ An explicit `--precip-mask-threshold-mm` overrides either default.
 
 ## Troubleshooting
 
+- **`KeyError: 'activate'` when starting `fdb/5.21`:** a legacy user-installed
+  `uenv` is shadowing `/usr/bin/uenv`; use the system client version 8 or newer.
 - **`fdb-utils` or FDB source errors:** confirm the command is inside
-  `uenv run --view=realtime fdb/...`.
+  `/usr/bin/uenv run --view=realtime fdb/...`.
 - **Python cannot import FDB or Earthkit:** confirm `PYTHONPATH` begins with
   `/user-environment/venvs/fdb/lib/python3.11/site-packages:src`.
 - **ecCodes cannot resolve the local `PTYPE` parameter:** run inside the FDB
