@@ -98,6 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fdb-retries", type=int, default=0, help="Additional retries for transient FDB list/retrieve/decode failures")
     parser.add_argument("--fdb-retry-initial-s", type=float, default=10.0, help="Initial FDB retry delay in seconds")
     parser.add_argument("--fdb-retry-max-s", type=float, default=120.0, help="Maximum FDB retry delay in seconds")
+    parser.add_argument("--lock-timeout-s", type=float, default=0.0, help="Seconds to wait for another process using the same output cycle")
+    parser.add_argument("--no-resume", action="store_true", help="Regenerate requested outputs even when every existing member file verifies")
     parser.add_argument("--max-wall-s", type=float, default=None, help="Fail monitoring if run wall time exceeds this limit")
     parser.add_argument("--no-output-file-check", action="store_true", help="Skip post-run checks for expected member output files")
     parser.add_argument(
@@ -138,6 +140,8 @@ def main() -> int:
     if args.start_step < 0:
         parser.error(f"--start-step must be non-negative, got {args.start_step}")
     effective_max_step = MODEL_MAX_STEP[args.model] if args.max_step is None else args.max_step
+    if effective_max_step > MODEL_MAX_STEP[args.model]:
+        parser.error(f"--max-step must be <= {MODEL_MAX_STEP[args.model]} for {args.model}, got {effective_max_step}")
     if args.start_step > effective_max_step:
         parser.error(f"--start-step must be <= --max-step, got start_step={args.start_step} max_step={effective_max_step}")
     if args.chunk_size <= 0:
@@ -156,6 +160,8 @@ def main() -> int:
         parser.error(f"--fdb-retry-max-s must be positive, got {args.fdb_retry_max_s}")
     if args.fdb_retry_max_s < args.fdb_retry_initial_s:
         parser.error("--fdb-retry-max-s must be >= --fdb-retry-initial-s")
+    if args.lock_timeout_s < 0:
+        parser.error(f"--lock-timeout-s must be non-negative, got {args.lock_timeout_s}")
     if args.write_probability_products and args.output_format != "netcdf":
         parser.error("--write-probability-products requires --output-format=netcdf")
 
@@ -194,6 +200,8 @@ def main() -> int:
         fdb_retries=args.fdb_retries,
         fdb_retry_initial_s=args.fdb_retry_initial_s,
         fdb_retry_max_s=args.fdb_retry_max_s,
+        resume=not args.no_resume,
+        lock_timeout_s=args.lock_timeout_s,
         max_wall_s=args.max_wall_s,
         check_output_files=not args.no_output_file_check,
         write_probability_products=args.write_probability_products,

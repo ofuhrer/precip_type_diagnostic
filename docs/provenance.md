@@ -63,4 +63,7 @@ Every accepted release should archive:
 - local MeteoSwiss ecCodes definition source, if overridden;
 - Balfrin smoke-test `summary.json` and `monitoring.json` for each supported
   source covered by the release;
+- progressive `CYCLE.json` and increment evidence for CH1/CH2, plus the REA
+  inventory manifest, representative task receipts, and verified campaign
+  status for backfill releases;
 - approval owner and date.

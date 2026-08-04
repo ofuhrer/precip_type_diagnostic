@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import fcntl
 import getpass
 import json
 import logging
@@ -20,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from random import uniform
-from typing import Protocol, TypedDict, TypeVar
+from typing import IO, Protocol, TypedDict, TypeVar
 
 # isort: off
 import eccodes as _eccodes  # noqa: F401  # Import before earthkit; some FDB uenv builds require it.
@@ -37,13 +38,26 @@ from .constants import (
     ICON_REFERENCE_COMMIT,
     ICON_UNAVAILABLE_ONLINE_RATE_COMPONENTS,
     INPUT_PARAM_IDS,
+    MEMBER_DIAGNOSTIC_VARIABLES,
+    OUTPUT_PARAM_ID,
+    OUTPUT_SHORT_NAME,
+    PrecipitationTypeCode,
 )
-from .gribio import check_precip_mask_threshold_mm, derive_vertical_level_selection, write_output_grib
+from .gribio import (
+    check_precip_mask_threshold_mm,
+    derive_vertical_level_selection,
+    read_categorical_grib,
+    read_grib_metadata,
+    write_output_grib,
+)
 from .grid import GridInputs, diagnose_grid_categorical, diagnose_grid_categorical_with_quality, diagnose_grid_probabilities_with_quality
 from .monitoring import build_monitoring_status
+from .netcdfio import inspect_netcdf, read_netcdf
 from .probabilities import (
     disabled_probability_summary,
     generate_probability_products,
+    member_grib_path,
+    member_netcdf_path,
     write_member_diagnostic_netcdf,
     write_member_ptype_netcdf,
 )
@@ -55,6 +69,7 @@ _ACTIVE_RUN_MARKER: ContextVar[tuple[Path, dict[str, object]] | None] = ContextV
     "precip_type_diag_active_run_marker",
     default=None,
 )
+_ACTIVE_CYCLE_LOCK: ContextVar[CycleLock | None] = ContextVar("precip_type_diag_active_cycle_lock", default=None)
 
 
 @dataclass(frozen=True)
@@ -79,7 +94,7 @@ MODEL_SPECS = {
         expver="0001",
         stream="enfo",
         members=tuple(f"{member:03d}" for member in range(11)),
-        max_step=33,
+        max_step=45,
         uenv_view="realtime",
     ),
     "ICON-CH2-EPS": FdbModelSpec(
@@ -107,7 +122,9 @@ MODEL_SPECS = {
 }
 MODEL_TO_FDB = {model: spec.fdb_model for model, spec in MODEL_SPECS.items()}
 MODEL_MAX_STEP = {model: spec.max_step for model, spec in MODEL_SPECS.items()}
+MODEL_DEFAULT_MAX_STEP = {**MODEL_MAX_STEP, "ICON-CH1-EPS": 33}
 MODEL_MEMBERS = {model: spec.members for model, spec in MODEL_SPECS.items()}
+CH1_LONG_HORIZON_CYCLE_TIMES = ("0300",)
 DEFAULT_OUTPUT_ROOT = Path(os.environ.get("PRECIP_TYPE_DIAG_OUTPUT_ROOT", "/tmp/precip_type_diag"))
 FULL_LEVELS = 80
 HALF_LEVELS = 81
@@ -137,6 +154,18 @@ TIMING_KEYS = (
     "diagnose_s",
     "write_s",
 )
+
+
+def expected_cycle_max_step(model: str, time_value: str) -> int:
+    """Return the reviewed operational horizon for an explicit model cycle."""
+
+    if model not in MODEL_SPECS:
+        raise ValueError(f"Unsupported model {model!r}")
+    if model == "ICON-CH1-EPS":
+        return MODEL_MAX_STEP[model] if time_value in CH1_LONG_HORIZON_CYCLE_TIMES else MODEL_DEFAULT_MAX_STEP[model]
+    return MODEL_MAX_STEP[model]
+
+
 DATA_QUALITY_KEYS = (
     "total_columns",
     "active_columns",
@@ -159,6 +188,56 @@ class FdbTransientError(RuntimeError):
 
 class FdbIncompleteError(RuntimeError):
     """Raised when FDB contains an incomplete run for the requested cycle."""
+
+
+class CycleLockedError(RuntimeError):
+    """Raised when another process owns the selected output cycle."""
+
+
+@dataclass
+class CycleLock:
+    path: Path
+    timeout_s: float = 0.0
+    _handle: IO[str] | None = None
+
+    def acquire(self) -> None:
+        if self.timeout_s < 0:
+            raise ValueError(f"lock timeout must be non-negative, got {self.timeout_s}")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+", encoding="utf-8")
+        deadline = time.monotonic() + self.timeout_s
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    raise CycleLockedError(f"Cycle is locked by another process: {self.path}") from exc
+                time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+        handle.seek(0)
+        handle.truncate()
+        json.dump(
+            {
+                "hostname": socket.gethostname(),
+                "pid": os.getpid(),
+                "acquired_at": datetime.now(timezone.utc).isoformat(),
+            },
+            handle,
+            sort_keys=True,
+        )
+        handle.write("\n")
+        handle.flush()
+        self._handle = handle
+
+    def release(self) -> None:
+        if self._handle is None:
+            return
+        try:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._handle.close()
+            self._handle = None
 
 
 @dataclass(frozen=True)
@@ -294,6 +373,7 @@ class MemberProcessKwargs(TypedDict):
     write_probability_products: bool
     output_format: str
     retry_config: RetryConfig
+    resume: bool
 
 
 def normalize_output_format(value: str) -> str:
@@ -361,9 +441,13 @@ def config_for_model(
     normalized_algorithm = normalize_algorithm(algorithm)
     default_threshold = 0.01 if normalized_algorithm == ALGORITHM_ICON else 0.0
     threshold = check_precip_mask_threshold_mm(default_threshold if precip_mask_threshold_mm is None else precip_mask_threshold_mm)
-    effective_max_step = MODEL_MAX_STEP[model] if max_step is None else max_step
+    effective_max_step = MODEL_DEFAULT_MAX_STEP[model] if max_step is None else max_step
     if effective_max_step < 0:
         raise ValueError(f"max_step must be non-negative, got {effective_max_step}")
+    if effective_max_step > MODEL_MAX_STEP[model]:
+        raise ValueError(
+            f"max_step must be <= {MODEL_MAX_STEP[model]} for {model}, got {effective_max_step}"
+        )
     if start_step < 0:
         raise ValueError(f"start_step must be non-negative, got {start_step}")
     if start_step > effective_max_step:
@@ -548,6 +632,7 @@ def _filter_parts(
 def _fdb_utils_list(
     filter_expr: str,
     *,
+    show_keys: tuple[str, ...] | None = None,
     retry_config: RetryConfig | None = None,
     retry_stats: RetryStats | None = None,
 ) -> dict[str, list[object]]:
@@ -557,7 +642,7 @@ def _fdb_utils_list(
     result = _retry_operation(
         "fdb-utils list",
         lambda: subprocess.run(
-            ["fdb-utils", "list", "--filter", filter_expr],
+            ["fdb-utils", "list", *([",".join(show_keys)] if show_keys else []), "--filter", filter_expr],
             check=True,
             capture_output=True,
             text=True,
@@ -1332,6 +1417,96 @@ def _process_chunk(
     return previous_total_precip, written, diagnostic_netcdf_outputs_written, active_columns, total_columns, data_quality
 
 
+def _member_output_path(
+    output_root: Path,
+    model: str,
+    date: str,
+    time_value: str,
+    member: str,
+    step: int,
+    output_format: str,
+) -> Path:
+    if output_format == "netcdf":
+        return member_netcdf_path(output_root, model, date, time_value, member, step)
+    return member_grib_path(output_root, model, date, time_value, member, step)
+
+
+def _valid_existing_member_output(
+    path: Path,
+    *,
+    model: str,
+    date: str,
+    time_value: str,
+    member: str,
+    step: int,
+    algorithm: str,
+    output_format: str,
+    require_diagnostics: bool,
+) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        if output_format == "grib2":
+            read_categorical_grib(path)
+            metadata = read_grib_metadata(path, ("shortName", "paramId", "dataDate", "dataTime", "endStep"))
+            expected_metadata: dict[str, object] = {
+                "shortName": OUTPUT_SHORT_NAME,
+                "paramId": OUTPUT_PARAM_ID,
+                "dataDate": int(date),
+                "dataTime": int(time_value),
+                "endStep": step,
+            }
+            return all(str(metadata.get(key)) == str(value) for key, value in expected_metadata.items())
+        attrs, variables = inspect_netcdf(path)
+        expected_attrs: dict[str, object] = {
+            "model": model,
+            "date": date,
+            "time": time_value,
+            "member": member,
+            "step": step,
+            "diagnostic_algorithm": algorithm,
+        }
+        if any(str(attrs.get(key)) != str(value) for key, value in expected_attrs.items()):
+            return False
+        required_variables = set(MEMBER_DIAGNOSTIC_VARIABLES if require_diagnostics else ("ptype",))
+        if not required_variables.issubset(variables):
+            return False
+        ptype = np.asarray(read_netcdf(path)["ptype"])
+        if not np.all(np.isfinite(ptype)) or not np.all(ptype == np.rint(ptype)):
+            return False
+        allowed = {int(code) for code in PrecipitationTypeCode}
+        return not (set(int(value) for value in np.unique(ptype)) - allowed)
+    except Exception:
+        LOGGER.warning("existing output failed verification and will be regenerated: %s", path, exc_info=True)
+        return False
+
+
+def _all_member_outputs_valid(
+    *,
+    run: FdbRun,
+    output_root: Path,
+    output_model: str,
+    start_step: int,
+    algorithm: str,
+    output_format: str,
+    require_diagnostics: bool,
+) -> bool:
+    return all(
+        _valid_existing_member_output(
+            _member_output_path(output_root, output_model, run.date, run.time, run.member, step, output_format),
+            model=output_model,
+            date=run.date,
+            time_value=run.time,
+            member=run.member,
+            step=step,
+            algorithm=algorithm,
+            output_format=output_format,
+            require_diagnostics=require_diagnostics,
+        )
+        for step in range(start_step, run.max_step + 1)
+    )
+
+
 def process_member_run(
     *,
     run: FdbRun,
@@ -1347,6 +1522,7 @@ def process_member_run(
     write_probability_products: bool = False,
     output_format: str = "grib2",
     retry_config: RetryConfig | None = None,
+    resume: bool = True,
 ) -> dict[str, object]:
     algorithm = normalize_algorithm(algorithm)
     config = RetryConfig() if retry_config is None else retry_config
@@ -1355,6 +1531,58 @@ def process_member_run(
     if write_probability_products and normalized_output_format != "netcdf":
         raise ValueError("write_probability_products requires output_format='netcdf'")
     _configure_meteoswiss_definitions()
+    expected_step_count = run.max_step - start_step + 1
+    if resume and _all_member_outputs_valid(
+        run=run,
+        output_root=output_root,
+        output_model=output_model,
+        start_step=start_step,
+        algorithm=algorithm,
+        output_format=normalized_output_format,
+        require_diagnostics=write_probability_products,
+    ):
+        LOGGER.info(
+            "reusing verified member outputs member=%s model=%s date=%s time=%s steps=%s..%s",
+            run.member,
+            output_model,
+            run.date,
+            run.time,
+            start_step,
+            run.max_step,
+        )
+        return {
+            "run": {
+                "date": run.date,
+                "time": run.time,
+                "model": run.model,
+                "member": run.member,
+                "type": run.type,
+                "number": run.number,
+                "max_step": run.max_step,
+            },
+            "chunk_size": chunk_size,
+            "prefetch": prefetch,
+            "start_step": start_step,
+            "algorithm": algorithm,
+            "steps": expected_step_count,
+            "chunks": 0,
+            "static_fdb_request_count": 0,
+            "dynamic_fdb_request_count": 0,
+            "fdb_request_count": 0,
+            "fdb_utils_check_count": 0,
+            "written": expected_step_count,
+            "newly_written": 0,
+            "reused": expected_step_count,
+            "resumed": True,
+            "diagnostic_netcdf_outputs_written": expected_step_count if write_probability_products else 0,
+            "retained_full_levels": None,
+            "active_columns": 0,
+            "total_columns": 0,
+            "data_quality": {key: 0 for key in DATA_QUALITY_KEYS},
+            "retry_stats": RetryStats().as_dict(),
+            "timings_s": Timings(discovery_s=run.discovery_s).as_dict(),
+            "wall_s": 0.0,
+        }
     if algorithm == ALGORITHM_ICON:
         _warm_diagnostic(algorithm)
     else:
@@ -1541,6 +1769,9 @@ def process_member_run(
             else 0
         ),
         "written": written,
+        "newly_written": written,
+        "reused": 0,
+        "resumed": False,
         "diagnostic_netcdf_outputs_written": diagnostic_netcdf_outputs_written,
         "retained_full_levels": selection.retained_full_levels,
         "active_columns": active_columns,
@@ -1570,6 +1801,7 @@ def _process_member(
     write_probability_products: bool = False,
     output_format: str = "grib2",
     retry_config: RetryConfig | None = None,
+    resume: bool = True,
 ) -> dict[str, object]:
     return process_member_run(
         run=_make_run(model, member, date, time_value, max_step),
@@ -1585,6 +1817,7 @@ def _process_member(
         write_probability_products=write_probability_products,
         output_format=output_format,
         retry_config=retry_config,
+        resume=resume,
     )
 
 
@@ -1682,12 +1915,58 @@ def _write_run_marker(run_dir: Path, name: str, payload: dict[str, object]) -> P
     return _atomic_write_json(marker_payload, run_dir / f"{name}.json")
 
 
+def _ensure_run_contract(
+    run_dir: Path,
+    *,
+    model: str,
+    date: str,
+    time_value: str,
+    algorithm: str,
+    output_format: str,
+    precip_mask_threshold_mm: float,
+    vertical_cutoff_m: float,
+    write_probability_products: bool,
+) -> dict[str, object]:
+    contract: dict[str, object] = {
+        "schema_version": 1,
+        "model": model,
+        "date": date,
+        "time": time_value,
+        "diagnostic_algorithm": algorithm,
+        "output_format": output_format,
+        "precip_mask_threshold_mm": precip_mask_threshold_mm,
+        "vertical_cutoff_m": vertical_cutoff_m,
+        "write_probability_products": write_probability_products,
+        "member_contract": list(MODEL_MEMBERS[model]),
+    }
+    path = run_dir / "CONTRACT.json"
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Cannot read existing run contract {path}: {exc}") from exc
+        if existing != contract:
+            raise RuntimeError(
+                f"Output cycle contract mismatch at {path}; use a separate output root for a different algorithm or format"
+            )
+        return contract
+
+    existing_outputs = any(run_dir.glob("[0-9][0-9][0-9]/lfff*.ptype.*")) or (run_dir / "probabilities").exists()
+    if existing_outputs:
+        raise RuntimeError(
+            f"Refusing to adopt uncontracted existing outputs in {run_dir}; move them aside or use a separate output root"
+        )
+    _atomic_write_json(contract, path)
+    return contract
+
+
 def _finalize_failed_run_marker(
     func: Callable[..., dict[str, object]],
 ) -> Callable[..., dict[str, object]]:
     @wraps(func)
     def wrapper(*args: object, **kwargs: object) -> dict[str, object]:
         token = _ACTIVE_RUN_MARKER.set(None)
+        lock_token = _ACTIVE_CYCLE_LOCK.set(None)
         try:
             return func(*args, **kwargs)
         except BaseException as exc:
@@ -1710,7 +1989,11 @@ def _finalize_failed_run_marker(
                     _safe_unlink(run_dir / "RUNNING.json")
             raise
         finally:
+            active_lock = _ACTIVE_CYCLE_LOCK.get()
+            if active_lock is not None:
+                active_lock.release()
             _ACTIVE_RUN_MARKER.reset(token)
+            _ACTIVE_CYCLE_LOCK.reset(lock_token)
 
     return wrapper
 
@@ -1800,6 +2083,8 @@ def run_operational(
     fdb_retries: int = 0,
     fdb_retry_initial_s: float = 10.0,
     fdb_retry_max_s: float = 120.0,
+    resume: bool = True,
+    lock_timeout_s: float = 0.0,
 ) -> dict[str, object]:
     if (date is None) != (time_value is None):
         raise ValueError("date and time_value must be provided together")
@@ -1809,6 +2094,8 @@ def run_operational(
         raise ValueError(f"max_wall_s must be positive, got {max_wall_s}")
     if attempt is not None and attempt < 1:
         raise ValueError(f"attempt must be >= 1, got {attempt}")
+    if lock_timeout_s < 0:
+        raise ValueError(f"lock_timeout_s must be non-negative, got {lock_timeout_s}")
     retry_config = retry_config_from_options(
         retries=fdb_retries,
         initial_delay_s=fdb_retry_initial_s,
@@ -1820,6 +2107,9 @@ def run_operational(
         raise ValueError("--write-probability-products requires output_format='netcdf'")
 
     LOGGER.info("starting operational run model=%s members=%s", model, members if members is not None else "all")
+    cycle_max_step = max_step
+    if cycle_max_step is None and time_value is not None:
+        cycle_max_step = expected_cycle_max_step(model, time_value)
     config = config_for_model(
         model,
         members=members,
@@ -1828,7 +2118,7 @@ def run_operational(
         precip_mask_threshold_mm=precip_mask_threshold_mm,
         vertical_cutoff_m=vertical_cutoff_m,
         start_step=start_step,
-        max_step=max_step,
+        max_step=cycle_max_step,
         workers=workers,
         chunk_size=chunk_size,
         prefetch=prefetch,
@@ -1864,6 +2154,20 @@ def run_operational(
         LOGGER.info("discovered run model=%s date=%s time=%s", model, date, time_value)
 
     run_dir = config.output_root / model / str(date) / str(time_value)
+    cycle_lock = CycleLock(run_dir / ".cycle.lock", timeout_s=lock_timeout_s)
+    cycle_lock.acquire()
+    _ACTIVE_CYCLE_LOCK.set(cycle_lock)
+    run_contract = _ensure_run_contract(
+        run_dir,
+        model=model,
+        date=str(date),
+        time_value=str(time_value),
+        algorithm=config.algorithm,
+        output_format=config.output_format,
+        precip_mask_threshold_mm=config.precip_mask_threshold_mm,
+        vertical_cutoff_m=config.vertical_cutoff_m,
+        write_probability_products=write_probability_products,
+    )
     run_metadata = _collect_run_metadata(
         model=model,
         date=str(date),
@@ -1910,6 +2214,7 @@ def run_operational(
             "write_probability_products": write_probability_products,
             "output_format": config.output_format,
             "retry_config": retry_config,
+            "resume": resume,
         }
         for member in config.members
     }
@@ -2024,6 +2329,8 @@ def run_operational(
         "probabilistic_products": probability_summary,
         "provenance": collect_runtime_provenance(),
         "run_metadata": run_metadata,
+        "run_contract": run_contract,
+        "resume": resume,
         "wall_s": round(time.perf_counter() - start, 3),
         "per_member": ordered_results,
     }

@@ -144,7 +144,7 @@ def test_generate_probability_products_requires_all_member_netcdf_diagnostics(tm
     assert summary["files_written"] == 0
     assert summary["missing_members"] == ["001"]
     assert "failed members: 001" in str(summary["error"])
-    assert not stale_output_dir.exists()
+    assert (stale_output_dir / "stale.nc").read_bytes() == b"stale"
 
 
 def test_generate_probability_products_writes_step_netcdf(tmp_path: Path) -> None:
@@ -225,7 +225,7 @@ def test_icon_probability_products_include_refined_category_frequencies(tmp_path
         assert variables[f"ptype_probability_{code}"][index] == 100.0
 
 
-def test_generate_probability_products_replaces_existing_step_set(tmp_path: Path) -> None:
+def test_generate_probability_products_preserves_existing_steps_during_increment(tmp_path: Path) -> None:
     date = "20260531"
     time_value = "1800"
     member_dir = tmp_path / "ICON-CH1-EPS" / date / time_value / "000"
@@ -264,4 +264,8 @@ def test_generate_probability_products_replaces_existing_step_set(tmp_path: Path
     )
     assert second["status"] == "ok"
     output_dir = tmp_path / "ICON-CH1-EPS" / date / time_value / "probabilities"
-    assert sorted(path.name for path in output_dir.iterdir()) == ["lfff00000000.ptype_prob.nc"]
+    assert sorted(path.name for path in output_dir.iterdir()) == [
+        "lfff00000000.ptype_prob.nc",
+        "lfff00010000.ptype_prob.nc",
+    ]
+    assert second["retained_existing_files"] == 2

@@ -353,13 +353,6 @@ def _failure_summary(
     }
 
 
-def _remove_probability_output(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink(missing_ok=True)
-    elif path.exists():
-        shutil.rmtree(path)
-
-
 def _publish_probability_directory(staging_dir: Path, output_dir: Path) -> None:
     backup_dir = output_dir.parent / f".{output_dir.name}.backup.{os.getpid()}.{time.time_ns()}"
     had_existing_output = output_dir.exists() or output_dir.is_symlink()
@@ -438,7 +431,6 @@ def generate_probability_products(
         )
         preflight_s += time.perf_counter() - preflight_start
     except ProbabilityProductError as exc:
-        _remove_probability_output(output_dir)
         return _failure_summary(
             output_dir=output_dir,
             members=members,
@@ -451,7 +443,12 @@ def generate_probability_products(
     run_dir.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(tempfile.mkdtemp(dir=run_dir, prefix=".probabilities."))
     staged_files: list[Path] = []
+    retained_existing_files = 0
     try:
+        if output_dir.is_dir():
+            for existing_path in output_dir.glob("*.ptype_prob.nc"):
+                shutil.copy2(existing_path, staging_dir / existing_path.name)
+                retained_existing_files += 1
         for step in range(start_step, max_step + 1):
             read_start = time.perf_counter()
             diagnostics = [
@@ -489,7 +486,6 @@ def generate_probability_products(
         _publish_probability_directory(staging_dir, output_dir)
         publish_s += time.perf_counter() - publish_start
     except Exception as exc:
-        _remove_probability_output(output_dir)
         return _failure_summary(
             output_dir=output_dir,
             members=members,
@@ -510,6 +506,7 @@ def generate_probability_products(
         "products": list(probability_product_names(algorithm)),
         "diagnostic_algorithm": algorithm,
         "files_written": len(staged_files),
+        "retained_existing_files": retained_existing_files,
         "output_dir": str(output_dir),
         "required_members": list(members),
         "valid_members": list(processed_members),

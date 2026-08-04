@@ -33,17 +33,23 @@ available components and reports that exact online refinement parity is false.
 
 | CLI model | View | FDB identity (`class/stream/expver/model`) | Contract |
 | --- | --- | --- | --- |
-| `ICON-CH1-EPS` | `realtime` | `od/enfo/0001/icon-ch1-eps` | members `000..010`, steps `0..33`; latest complete cycle may be discovered |
-| `ICON-CH2-EPS` | `realtime` | `od/enfo/0001/icon-ch2-eps` | members `000..020`, steps `0..120`; latest complete cycle may be discovered |
+| `ICON-CH1-EPS` | `realtime` | `od/enfo/0001/icon-ch1-eps` | members `000..010`, steps `0..33` or `0..45`; latest ingesting or complete cycle |
+| `ICON-CH2-EPS` | `realtime` | `od/enfo/0001/icon-ch2-eps` | members `000..020`, steps `0..120`; latest ingesting or complete cycle |
 | `ICON-REA-L-CH1` | `rea-l-ch1` | `rd/reanl/r001/icon-rea-l-ch1` | member `000`, daily `0000` cycle, steps `0..24`; date/time must be explicit |
 
-The REA-L archive spans 2005–2025. Some surface variables mix 10-minute and
+The reviewed REA-L archive spans 2005–2025. Some surface variables mix 10-minute and
 hourly steps, so completeness checks constrain the requested hourly range.
 `fdb-utils list` omits `timespan` for this archive; retrieval still uses
 `timespan=none` for instantaneous fields and `timespan=fs` for accumulations.
 
 The reviewed realtime inventory exposes CH1/CH2 EPS, not KENDA-CH1; KENDA is
 therefore not a supported model.
+
+Under the reviewed operational schedule, CH1 `0300` cycles use the 45-hour
+all-member horizon and the other cycle times use 33 hours. The model-wide hard
+cap remains 45, while progressive state and default explicit-cycle processing
+select the expected horizon from the cycle time. This avoids treating a normal
+33-hour cycle as incomplete or truncating a long cycle.
 
 ## Input and Accumulation Contract
 
@@ -71,8 +77,11 @@ rates use the same adjacent-step difference divided by 3600 seconds. A negative
 delta is treated as an accumulator reset and uses the current value.
 
 Realtime accumulations start at the model forecast cycle. REA-L accumulations
-start at its daily 00 UTC cycle and end at step 24. The implementation enforces
-REA `time=0000`, caps the run at step 24, and never crosses a daily boundary.
+start at its daily 00 UTC cycle and end at step 24. Cycle `D`, step 24 is valid
+at `D+1 00 UTC`; it still belongs to cycle `D`. The implementation enforces REA
+`time=0000`, caps the run at step 24, and never crosses a daily boundary. The
+backfill manifest therefore records cycle-date bounds and the corresponding
+valid-time coverage separately.
 
 Production starts at step 1; step 0 only initializes the first delta. The CLI
 accepts `--start-step 0` for debugging, but that output is not a physically
@@ -116,7 +125,7 @@ reviewed performance/science contract, not a tuning parameter.
 The package includes an ecCodes overlay for MeteoSwiss `PTYPE`. Output writers
 validate shape, finite integer values, and the allowed code set.
 
-## Production Flow
+## Production Flows
 
 ```text
 FDB discovery/checks -> HHL selection -> chunk retrieval -> array validation
@@ -125,7 +134,13 @@ FDB discovery/checks -> HHL selection -> chunk retrieval -> array validation
 ```
 
 - `operational.py` owns source selection, FDB checks/retries, prefetching,
-  multiprocessing, output orchestration, and summaries.
+  multiprocessing, immutable cycle contracts, locking, verified resume, output
+  orchestration, and summaries.
+- `realtime.py` owns progressive EPS ingestion. It advances only through the
+  latest contiguous complete hour, runs all members, preserves earlier
+  probability hours, and records full-cycle state in `CYCLE.json`.
+- `backfill.py` owns immutable REA inventory manifests, one-day Slurm array
+  tasks, receipts, restart verification, and campaign status.
 - `gribio.py` writes GRIB2 from the current `TOT_PREC` template, preserving grid
   and run metadata while replacing parameter metadata and values.
 - `netcdfio.py` writes member data; `probabilities.py` strictly aggregates every
@@ -133,7 +148,11 @@ FDB discovery/checks -> HHL selection -> chunk retrieval -> array validation
   without geospatial coordinates or a grid mapping.
 - `monitoring.py` checks completeness, failures, data quality, expected files,
   probability generation, retries, and optional wall time.
-- Runs atomically publish `RUNNING.json`, then `DONE.json` or `FAILED.json`.
+- A cycle directory has one immutable `CONTRACT.json`, preventing accidental
+  mixing of algorithm, format, mask, cutoff, or probability mode. POSIX locks
+  prevent concurrent publishers.
+- Core increments atomically publish `RUNNING.json`, then `DONE.json` or
+  `FAILED.json`. `CYCLE.json` is authoritative for progressive full-cycle state.
 - Retries cover transient FDB list, retrieve, and decode/materialization
   failures only; deterministic failures remain visible.
 
@@ -145,7 +164,7 @@ FDB discovery/checks -> HHL selection -> chunk retrieval -> array validation
 | first step | `1` |
 | workers / chunk size | `8` / `2` hours |
 | prefetch | enabled |
-| member output | GRIB2 |
+| low-level member output | GRIB2 |
 | vertical cutoff | `12000 m` |
 | Firdewsa / ICON mask | `0.0 mm` / `0.01 mm` per hour |
 | probability scale | `0..100` percent |
@@ -154,12 +173,18 @@ Probability publication requires NetCDF and complete output from every requested
 member. Its thresholded intensity uses a 30% probability threshold and a
 `0.01 mm/h` precipitation mask.
 
+The accepted wrappers intentionally narrow these generic defaults: realtime EPS
+uses all members, NetCDF diagnostics, and probability products; REA backfills
+use member `000`, steps `1..24`, and categorical GRIB2. Both use Firdewsa unless
+an explicitly reviewed campaign selects `icon`.
+
 ## Verification
 
 Automated tests cover scalar science, Numba parity, frozen ICON Fortran vectors,
 grid validation, format contracts, probabilities, monitoring, CLI behavior, and
 mocked FDB orchestration. There are no real GRIB fixtures; live FDB verification
-is manual on Balfrin using the [README smoke tests](../README.md#smoke-tests).
+uses scheduled Balfrin jobs and the acceptance matrix in the
+[release checklist](release-checklist.md).
 
 For an executable ICON comparison:
 

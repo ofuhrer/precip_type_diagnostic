@@ -104,6 +104,8 @@ def test_cli_passes_fdb_options(monkeypatch: pytest.MonkeyPatch, capsys) -> None
             "fdb_retries": 3,
             "fdb_retry_initial_s": 1.5,
             "fdb_retry_max_s": 9.0,
+            "resume": True,
+            "lock_timeout_s": 0.0,
             "max_wall_s": 900.0,
             "check_output_files": False,
             "write_probability_products": True,

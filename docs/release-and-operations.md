@@ -1,114 +1,170 @@
 # Release and Operations
 
-Use [release-checklist.md](release-checklist.md) to record the exact revision,
-runtime, validation evidence, approvals, and rollback target. Setup and smoke
-commands are maintained in the [README](../README.md); source and licensing
-constraints are in [provenance.md](provenance.md).
+The [README](../README.md) is the operator quick start. This guide defines the
+scheduling, monitoring, restart, release, and rollback contracts. Record each
+candidate in [release-checklist.md](release-checklist.md).
 
-## Release Gate
+## Release gate
 
-Before tagging or promoting:
+Before tagging or promotion:
 
-1. Run the complete local gate from the README in a clean worktree and confirm
-   the GitHub Actions `tests` workflow passes.
-2. If ICON science changed, run the pinned executable Fortran comparison:
+1. Run the complete local gate in a clean worktree and confirm the GitHub
+   Actions `tests` workflow passes.
+2. Build and inspect a wheel after packaging changes, including the ecCodes
+   definition overlay and all console entry points.
+3. Run scheduled Balfrin acceptance jobs from the exact candidate revision:
+   CH1 progressive steps 1 then 2 plus a 45-hour-cycle horizon check, CH2
+   progressive steps 1 then 2, a complete
+   REA day with a partial-run restart, and representative early/middle/late REA
+   inventory dates.
+4. Test both algorithms when science or FDB selection changed. ICON science
+   changes also require the pinned executable Fortran comparison.
+5. Inspect at least one member and probability product per realtime model and
+   one GRIB2 product per REA era. Verify source, step, shape, category codes,
+   probability scale, and `monitoring.json["ok"]`.
+6. Archive commands, job IDs, logs, summaries, monitoring files, runtime
+   versions, and the scientific and operational approvals.
 
-   ```bash
-   PYTHONPATH=src python tools/verify_icon_fortran.py --icon-repo /path/to/icon-nwp
-   ```
+Do not promote output from an unrecorded dirty worktree.
 
-3. If packaging changed, build a wheel and confirm the ecCodes definition files
-   are included.
-4. Run Balfrin smoke tests from the candidate revision for CH1, CH2, and one
-   explicit REA-L-CH1 day. Test both algorithms for science or FDB changes.
-5. Re-read at least one output per source and verify `PTYPE` metadata, shape,
-   step, and allowed category codes. Require `monitoring.json["ok"] == true`.
-6. Archive commands, logs, `summary.json`, `monitoring.json`, runtime versions,
-   and scientific/operational approvals with the release decision.
+## Reviewed Balfrin runtime
 
-Do not promote output from a dirty worktree unless its exact diff is archived
-and approved.
-
-## Versioning and Provenance
-
-Update the package version in `pyproject.toml`, then create an annotated tag:
-
-```bash
-git tag -a vX.Y.Z -m "precip_type_diag vX.Y.Z"
-git push origin vX.Y.Z
-```
-
-`summary.json` records Python/platform and dependency versions, Git revision and
-dirty state, arguments, FDB source, algorithm, mask, and ICON fidelity limits.
-Keep the tested uenv image and view with the release record.
-
-## Deployment
-
-Run the module or console entry point inside the matching FDB view:
+The reviewed baseline is `/usr/bin/uenv` 8+, `fdb/5.21:v1`, and the matching
+`realtime` or `rea-l-ch1` view. Install it once with:
 
 ```bash
-python -m precip_type_diag ...
-precip-type-diag ...
+tools/setup_balfrin.sh
 ```
 
-The reviewed Balfrin runtime is `/usr/bin/uenv` 8+ with `fdb/5.21:v1`, the FDB
-site-packages first on `PYTHONPATH`, and the project venv described in the
-README. Re-run live smokes whenever the image or environment changes.
+The setup script pins the packages absent from the FDB image and verifies the
+combined runtime. Re-run the full live gate when the image, view, Python ABI,
+or pinned packages change.
 
-For a scheduler-selected realtime cycle:
+## Realtime scheduling
+
+The production action is idempotent:
 
 ```bash
-tools/run_depl_cycle.sh ICON-CH2-EPS 20260531 18 /users/$USER/work/ptype-fdb
+tools/run_balfrin.sh realtime ICON-CH1-EPS /users/$USER/work/ptype-fdb
+tools/run_balfrin.sh realtime ICON-CH2-EPS /users/$USER/work/ptype-fdb
 ```
 
-The wrapper is limited to CH1/CH2 realtime forecasts. It selects all members,
-8 workers, 2-hour chunks, NetCDF probabilities, JSON INFO logs, and three
-bounded FDB retries. It does not submit a job or choose a partition. Invoke the
-module directly in `--view=rea-l-ch1` for an explicit REA day.
+A scheduler or DEPL event may call it repeatedly while ingestion is active.
+For an event-selected cycle, use:
 
-For manual Balfrin validation, use the generally open `pp-short` partition when
-the job fits its one-hour limit. Restricted production partitions are not the
-default for development or release smokes. A minimal submission is:
+```bash
+tools/run_depl_cycle.sh ICON-CH2-EPS YYYYMMDD HH /users/$USER/work/ptype-fdb
+```
+
+The wrapper processes every newly complete contiguous hour. It does not submit
+a job or choose a partition. A manual Balfrin validation that fits within one
+hour should use the generally open `pp-short` CPU partition:
 
 ```bash
 #!/usr/bin/env bash
-#SBATCH --job-name=ptype-diag
+#SBATCH --job-name=ptype-eps
 #SBATCH --partition=pp-short
 #SBATCH --time=00:59:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 
 set -euo pipefail
+[ -f /etc/profile.d/modules.sh ] && . /etc/profile.d/modules.sh
+if [[ -n "${USER_ENV_ROOT:-}" ]]; then
+  module use "$USER_ENV_ROOT/modules"
+fi
 cd /users/$USER/work/precip_type_diagnostic
 tools/run_depl_cycle.sh "$MODEL" "$DATE" "$TIME" "$OUTPUT_ROOT"
 ```
 
-## Monitoring
+`CYCLE.json` is the scheduler-facing full-cycle record:
 
-Each run directory contains:
+- `ingesting`: all processed increments succeeded but the cycle-specific
+  33/45-hour CH1 or 120-hour CH2 horizon
+  has not yet been reached;
+- `complete`: the full horizon is published;
+- `critical`: the latest attempted increment failed monitoring and the command
+  exited non-zero.
 
-- `summary.json`: selection, outputs, failures, data quality, timings, retries,
-  FDB source, algorithm fidelity, and provenance;
-- `monitoring.json`: scheduler-facing status and recommended exit code;
+Each successful invocation with new data appends an immutable increment record.
+An invocation with no new hour validates state, writes the refreshed state, and
+does no FDB data retrieval. `--through-step` is reserved for controlled catch-up
+and acceptance tests.
+
+## REA backfill scheduling
+
+Planning is inventory-backed and uses inclusive cycle dates:
+
+```bash
+CAMPAIGN=/users/$USER/work/ptype-rea-campaign
+tools/run_balfrin.sh backfill-plan \
+  --start-date 20050101 --end-date 20250831 \
+  --output-root "$CAMPAIGN/output" \
+  --manifest "$CAMPAIGN/manifest.json"
+sbatch "$CAMPAIGN/manifest.sbatch"
+```
+
+The generated `pp-long` array assigns one 00 UTC cycle and steps 1..24 to each
+task. Each task writes a receipt under `receipts/`, records its attempt in the
+run summary, and returns non-zero on critical monitoring. The manifest is the
+immutable campaign contract; create a new campaign directory to change dates,
+algorithm, output root, or missing-date policy.
+
+Check progress cheaply, then verify all outputs before acceptance:
+
+```bash
+tools/run_balfrin.sh backfill-status "$CAMPAIGN/manifest.json"
+tools/run_balfrin.sh backfill-status "$CAMPAIGN/manifest.json" --verify-outputs
+```
+
+Re-submit specific failed/pending indices with Slurm's `--array` override. A
+task skips only a verified complete day. Otherwise it reruns the complete daily
+cycle; it never differences step 24 of one day against the next day's step 0.
+
+## Concurrency and publication safety
+
+One `.progressive.lock` serializes realtime orchestration and one `.cycle.lock`
+serializes core publication for a model/cycle/output root. The lock file may
+remain after a run because the kernel lock, not file existence, determines
+ownership. Do not remove a lock file while a process may be active.
+
+`CONTRACT.json` is immutable. A different algorithm, output format, mask,
+vertical cutoff, or probability mode requires a different output root.
+Verified complete member outputs are reused on retry;
+invalid or incomplete ranges are regenerated. Probability publication stages a
+complete directory and replaces it atomically, retaining prior hours.
+
+## Monitoring and incidents
+
+Each core run writes:
+
+- `summary.json`: source, cycle, outputs, failures, data quality, timings,
+  retries, resume counts, algorithm fidelity, and runtime/Git provenance;
+- `monitoring.json`: alerts, status, and recommended exit code;
 - `RUNNING.json`, atomically replaced by `DONE.json` or `FAILED.json`.
 
-Monitoring is critical when a member is missing/failed/incomplete, fatal data
-quality is non-zero, expected files are absent, requested probability generation
-fails, FDB retries are exhausted, or the configured wall limit is exceeded. A
-critical status produces a non-zero process exit.
+Monitoring is critical for failed or incomplete members, fatal data quality,
+missing expected files, strict probability failure, exhausted FDB retries, or a
+configured wall-time violation. Start incident review with `CYCLE.json` for
+realtime or `campaign-status.json` for REA, then inspect the referenced
+monitoring file, summary, receipt, and logs.
 
-Use `--monitoring-json` for an additional scheduler-facing copy and
-`--log-format json` for machine-readable logs. Start incident review with
-`monitoring.json`, then inspect its alerts, `summary.json["failed"]`, retry
-counters, and the run log.
+Retries are limited to transient FDB listing, retrieval, and decoding.
+Scientific validation, shape, category, completeness, contract, and publication
+errors remain visible. Do not bypass them with scheduler retry loops alone.
 
-Retries are intentionally limited to transient FDB listing, retrieval, and
-decode/materialization failures. Invalid data, shapes, categories, incomplete
-FDB content, and strict probability failures are not retried.
+## Versioning, promotion, and rollback
 
-## Rollback
+`summary.json` records the Git revision and dirty state. For an accepted release,
+update `pyproject.toml`, secure the approvals in the checklist, and create an
+annotated tag:
 
-Run the previous accepted tag in its recorded runtime, verify it with the same
-smoke contract, and replace candidate products atomically at the publication
-boundary. Retain the previous tag, runtime record, and outputs until the new
-release completes its agreed retention period.
+```bash
+git tag -a vX.Y.Z -m "precip_type_diag vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+Rollback by running the previous accepted tag in its recorded runtime and a new
+output root, verifying the same smoke contract, then switching the downstream
+publication boundary atomically. Retain both product roots and release records
+through the agreed rollback window.

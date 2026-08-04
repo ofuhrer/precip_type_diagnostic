@@ -10,8 +10,9 @@ Balfrin and offers two modes:
 - `icon`: offline adaptation pinned to ICON commit
   `50da7c5924994f7626688eb5185b8e66c781b12e`.
 
-Member output is categorical `PTYPE` in GRIB2 (default) or NetCDF. Ensemble
-probabilities require NetCDF.
+The accepted wrappers use NetCDF plus strict ensemble probabilities for
+realtime EPS and categorical GRIB2 for REA backfills. The lower-level CLI also
+supports either member format.
 
 ## Before Editing
 
@@ -34,10 +35,15 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
   accelerated path.
 - `grid.py`: array validation and grid diagnosis.
 - `operational.py`: FDB contracts, retrieval, processing, output, and summaries.
+- `realtime.py`: progressive EPS discovery, cycle state, and incremental publish.
+- `backfill.py`: REA inventory manifests, daily tasks, receipts, and status.
 - `gribio.py`, `netcdfio.py`, `probabilities.py`: product formats and aggregation.
 - `monitoring.py`: operational status and exit contract.
 - `definitions/`: packaged ecCodes `PTYPE` overlay.
-- `tools/run_depl_cycle.sh`: realtime fixed-cycle wrapper; it does not submit jobs.
+- `tools/setup_balfrin.sh`: reviewed one-command Balfrin runtime setup.
+- `tools/run_balfrin.sh`: unified accepted operator entry point.
+- `tools/run_depl_cycle.sh`: progressive explicit-cycle compatibility wrapper;
+  it does not submit jobs.
 
 ## Contracts to Preserve
 
@@ -52,11 +58,18 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
 - Hourly amounts are adjacent accumulation differences. Realtime accumulations
   start at the forecast cycle; REA-L-CH1 accumulates from its daily `0000` cycle
   through step 24 and must never cross a day boundary.
-- CH1: members `000..010`, step 33. CH2: `000..020`, step 120. REA-L-CH1:
+- CH1: members `000..010`, maximum step 45; current `0300` cycles use 45
+  and other cycles use 33. CH2: `000..020`, step 120. REA-L-CH1:
   member `000`, step 24, explicit date and `time=0000`.
-- Default processing uses step 1 onward, 8 member workers, 2-hour chunks,
-  prefetch, and GRIB2. Probability aggregation is strict across requested
-  members and uses percent values (`0..100`).
+- Generic processing uses step 1 onward, 8 member workers, 2-hour chunks,
+  prefetch, and GRIB2. Accepted realtime processing uses all members, NetCDF,
+  and probabilities; accepted REA processing uses member `000`, steps `1..24`,
+  and GRIB2. Probability aggregation is strict and uses percent (`0..100`).
+- Realtime publication advances only through contiguous complete hours and
+  preserves earlier products. REA manifests contain independent daily cycles;
+  cycle `D` step 24 is valid at `D+1 00 UTC` but remains part of cycle `D`.
+- Preserve immutable `CONTRACT.json`, progressive `CYCLE.json`, locks, verified
+  resume, per-increment evidence, and campaign receipt/status contracts.
 - Fail visibly on deterministic science, shape, validation, and completeness
   errors. Retry only transient FDB list, retrieve, and decode failures.
 - Runs publish `RUNNING.json`, then atomically `DONE.json` or `FAILED.json`;
@@ -65,7 +78,7 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
   probability thresholds without production justification and appropriate
   scientific/operational review.
 
-Real FDB tests are manual on Balfrin; CI stays synthetic and mocked. There is no
+Real FDB tests are scheduled on Balfrin; CI stays synthetic and mocked. There is no
 file-input production path, plotting, bias correction, or station processing.
 
 ## Validation
@@ -82,9 +95,17 @@ python -m pip check
 git diff --check
 ```
 
-Also build and inspect a wheel after packaging changes. Run the README Balfrin
-smokes after production-facing changes; dual-mode releases cover all three
-models. Use `pp-short` for manual jobs that fit its limit.
+Also build and inspect a wheel after packaging changes. Run the release
+checklist's Balfrin acceptance matrix after production-facing changes;
+dual-mode FDB/science releases cover all three models. Use `pp-short` for jobs
+that fit its limit and `pp-long` for generated REA arrays.
+
+## Agent instruction consistency
+
+`AGENTS.md` is the repository's agent-facing source of truth; this repository
+currently contains no `SKILL.md` packages. If a repository-local skill is added,
+keep its Balfrin image, views, model horizons, accepted wrappers, REA date
+semantics, and validation gate consistent with this file and the README.
 
 ## Change Hygiene
 

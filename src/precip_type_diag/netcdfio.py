@@ -76,3 +76,11 @@ def write_netcdf(
 def read_netcdf(path: Path) -> dict[str, np.ndarray]:
     with netCDF4.Dataset(path, "r") as dataset:
         return {name: np.asarray(variable[:]) for name, variable in dataset.variables.items()}
+
+
+def inspect_netcdf(path: Path) -> tuple[dict[str, object], tuple[str, ...]]:
+    """Return global attributes and variable names without materializing arrays."""
+
+    with netCDF4.Dataset(path, "r") as dataset:
+        attrs = {name: dataset.getncattr(name) for name in dataset.ncattrs()}
+        return attrs, tuple(dataset.variables)

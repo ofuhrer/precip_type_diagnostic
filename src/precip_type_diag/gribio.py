@@ -301,6 +301,20 @@ def read_single_grib_message(path: Path) -> GribFieldMessage:
     )
 
 
+def read_grib_metadata(path: Path, keys: tuple[str, ...]) -> dict[str, object]:
+    """Read selected metadata from the single GRIB message at ``path``."""
+
+    bootstrap_eccodes_definitions()
+    with path.open("rb") as handle:
+        message_id = eccodes.codes_grib_new_from_file(handle)
+        if message_id is None:
+            raise ValueError(f"{path} does not contain a GRIB message")
+        try:
+            return {key: eccodes.codes_get(message_id, key) for key in keys}
+        finally:
+            eccodes.codes_release(message_id)
+
+
 def read_categorical_grib(path: Path) -> GribFieldMessage:
     field = read_single_grib_message(path)
     categorical = _check_categorical_codes(field.values, tuple(field.values.shape))

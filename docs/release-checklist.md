@@ -1,12 +1,12 @@
 # Release Checklist
 
-Complete this record for every candidate and accepted operational tag. Commands
-and interpretation are documented in the [README](../README.md) and
+Copy this template into the release record for every candidate. Commands and
+interpretation are in the [README](../README.md) and
 [release guide](release-and-operations.md).
 
 ## Candidate
 
-- Version / tag:
+- Version / proposed tag:
 - Commit:
 - Clean worktree: yes / no (attach approved diff if no)
 - Python version:
@@ -17,10 +17,9 @@ and interpretation are documented in the [README](../README.md) and
 - Scientific approver:
 - Operational approver:
 
-## Automated Gates
+## Automated gates
 
 ```bash
-python -m pip install -e ".[test,dev]"
 python -m py_compile src/precip_type_diag/*.py test/*.py
 python -m ruff check .
 python -m mypy
@@ -32,7 +31,7 @@ git diff --check
 
 - Local gate result:
 - GitHub Actions `tests` result:
-- Wheel contents checked, if packaging changed:
+- Wheel built and contents/entry points checked:
 
 For ICON science changes:
 
@@ -44,45 +43,45 @@ PYTHONPATH=src python tools/verify_icon_fortran.py --icon-repo /path/to/icon-nwp
 - Fortran source SHA-256:
 - Parity result:
 
-## Balfrin Evidence
+## Balfrin acceptance evidence
 
-Run the README smoke commands from the candidate revision. Use `pp-short` for
-manual jobs that fit its limit.
+Run every applicable row from the candidate revision as a CPU job. Record the
+exact command, Slurm job ID/log, summary, monitoring file, and inspection.
 
-| Source | Algorithm | Command/log | `summary.json` | `monitoring.json` | Output inspection |
-| --- | --- | --- | --- | --- | --- |
-| CH1 realtime | Firdewsa | | | | |
-| CH2 realtime | Firdewsa | | | | |
-| REA-L-CH1 | Firdewsa | | | | |
-| CH1 realtime | ICON, when required | | | | |
-| CH2 realtime | ICON, when required | | | | |
-| REA-L-CH1 | ICON, when required | | | | |
+| Path | Algorithm | Required behavior | Evidence |
+| --- | --- | --- | --- |
+| CH1 realtime | Firdewsa | bounded step 1, then step 2; prior probability retained | |
+| CH1 long cycle | Firdewsa | `0300` cycle records a 45-hour horizon | |
+| CH2 realtime | Firdewsa | bounded step 1, then step 2; prior probability retained | |
+| REA daily | Firdewsa | partial output followed by full 1..24 restart | |
+| REA early era | Firdewsa | inventory/retrieval/output inspection | |
+| REA middle era | Firdewsa | inventory/retrieval/output inspection | |
+| REA late era | Firdewsa | inventory/retrieval/output inspection | |
+| CH1/CH2/REA | ICON when required | archived microphysics and fidelity record | |
 
-Required for each executed row:
+For each executed row require:
 
-- process exit is zero and `monitoring.json["ok"]` is true;
-- `DONE.json` exists; `RUNNING.json` and `FAILED.json` do not;
-- source, cycle, algorithm, requested members/steps, and fidelity are correct;
-- at least one output has the expected `PTYPE` metadata, shape, step, and codes.
+- zero process exit and successful monitoring;
+- correct model, view, cycle, algorithm, members, and step range;
+- no lingering `RUNNING.json`; expected terminal/state marker exists;
+- output metadata, shape, finite allowed categories, and probability scale are
+  correct;
+- restart evidence shows no mixed contract and no loss of an earlier product.
 
-For REA, confirm view `rea-l-ch1`, cycle `0000`, and the daily-through-step-24
-accumulation contract. For ICON mode, confirm all three archived grid-scale
-microphysics fields passed completeness checks.
+For REA confirm `time=0000`, cycle `D` steps `1..24`, and final valid time
+`D+1 00 UTC`. For ICON mode confirm all three archived grid-scale microphysics
+accumulations passed completeness checks and the summary reports unavailable
+online convective/hail components.
 
-## Production-Path Smoke
+## Backfill campaign readiness
 
-For realtime releases, exercise the DEPL wrapper with a small override:
+- Inventory manifest date range and missing-date policy reviewed:
+- Generated Slurm partition, wall time, array size, and concurrency reviewed:
+- One task receipt and retry attempt reviewed:
+- `backfill-status --verify-outputs` result:
+- Storage estimate and retention owner:
 
-```bash
-tools/run_depl_cycle.sh ICON-CH2-EPS YYYYMMDD HH \
-  /users/$USER/work/ptype-fdb-depl-smoke --members 000 --max-step 1
-```
-
-- Wrapper command and JSON log:
-- Summary / monitoring / final marker:
-- Probability NetCDF for the tested step:
-
-## Decision and Rollback
+## Decision and rollback
 
 - Release decision and date:
 - Accepted tag:
@@ -91,7 +90,7 @@ tools/run_depl_cycle.sh ICON-CH2-EPS YYYYMMDD HH \
 - Product publication boundary:
 - Rollback command/location:
 
-Tag only after acceptance:
+Tag only after scientific and operational acceptance:
 
 ```bash
 git tag -a vX.Y.Z -m "precip_type_diag vX.Y.Z"

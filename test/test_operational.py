@@ -11,6 +11,8 @@ import pytest
 from precip_type_diag.constants import INPUT_PARAM_IDS
 from precip_type_diag.grid import GridInputs
 from precip_type_diag.operational import (
+    CycleLock,
+    CycleLockedError,
     FdbChunk,
     FdbRun,
     FdbTransientError,
@@ -30,13 +32,16 @@ from precip_type_diag.operational import (
     _process_chunk,
     _step_expr,
     _step_token,
+    _valid_existing_member_output,
     config_for_model,
+    expected_cycle_max_step,
     parse_members,
     process_member_run,
     retry_config_from_options,
     run_operational,
     validate_run_date_time,
 )
+from precip_type_diag.probabilities import member_netcdf_path, write_member_ptype_netcdf
 
 
 class FakeField:
@@ -134,6 +139,21 @@ def test_validate_run_date_time() -> None:
         validate_run_date_time("20260228", "18")
     with pytest.raises(ValueError, match="valid 24-hour time"):
         validate_run_date_time("20260228", "2400")
+
+
+def test_cycle_lock_prevents_concurrent_writers(tmp_path: Path) -> None:
+    path = tmp_path / ".cycle.lock"
+    first = CycleLock(path)
+    second = CycleLock(path)
+    first.acquire()
+    try:
+        with pytest.raises(CycleLockedError, match="locked by another process"):
+            second.acquire()
+    finally:
+        first.release()
+
+    second.acquire()
+    second.release()
 
 
 def test_field_grouping_uses_metadata_step_and_param() -> None:
@@ -596,6 +616,7 @@ def test_fdb_utils_list_reports_retry_exhaustion(monkeypatch: pytest.MonkeyPatch
 
 def test_config_for_model_rejects_invalid_values() -> None:
     default_config = config_for_model("ICON-CH1-EPS")
+    assert default_config.max_step == 33
     assert default_config.max_workers == 8
     assert default_config.chunk_size == 2
     assert default_config.prefetch is True
@@ -607,9 +628,18 @@ def test_config_for_model_rejects_invalid_values() -> None:
     reanalysis_config = config_for_model("ICON-REA-L-CH1")
     assert reanalysis_config.members == ("000",)
     assert reanalysis_config.max_step == 24
+    assert config_for_model("ICON-CH1-EPS", max_step=45).max_step == 45
+    assert expected_cycle_max_step("ICON-CH1-EPS", "0000") == 33
+    assert expected_cycle_max_step("ICON-CH1-EPS", "0300") == 45
 
     with pytest.raises(ValueError, match="Unsupported model"):
         config_for_model("ICON-CH3-EPS")
+    with pytest.raises(ValueError, match="must be <= 24"):
+        config_for_model("ICON-REA-L-CH1", max_step=25)
+    with pytest.raises(ValueError, match="must be <= 120"):
+        config_for_model("ICON-CH2-EPS", max_step=121)
+    with pytest.raises(ValueError, match="must be <= 45"):
+        config_for_model("ICON-CH1-EPS", max_step=46)
     with pytest.raises(ValueError, match="non-negative"):
         config_for_model("ICON-CH1-EPS", precip_mask_threshold_mm=-0.1)
     with pytest.raises(ValueError, match="positive"):
@@ -691,6 +721,39 @@ def test_run_operational_records_reanalysis_source_contract(monkeypatch: pytest.
         "fixed_time": "0000",
         "accumulation_contract": "from_0000_daily_cycle_through_step_24",
     }
+
+
+def test_run_operational_selects_cycle_specific_ch1_default_horizon(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    max_steps: list[int] = []
+
+    def fake_process_member(**kwargs):
+        max_steps.append(kwargs["max_step"])
+        return {
+            "run": {"member": kwargs["member"]},
+            "steps": kwargs["max_step"],
+            "written": kwargs["max_step"],
+            "timings_s": {},
+            "wall_s": 0.0,
+        }
+
+    monkeypatch.setattr("precip_type_diag.operational._configure_meteoswiss_definitions", lambda: None)
+    monkeypatch.setattr("precip_type_diag.operational._warm_diagnostic", lambda *args: None)
+    monkeypatch.setattr("precip_type_diag.operational._process_member", fake_process_member)
+
+    for time_value in ("0000", "0300"):
+        run_operational(
+            model="ICON-CH1-EPS",
+            members=("000",),
+            date="20260804",
+            time_value=time_value,
+            output_root=tmp_path,
+            workers=1,
+        )
+
+    assert max_steps == [33, 45]
 
 
 def test_run_operational_writes_summary_for_fixed_fdb_run(
@@ -951,6 +1014,129 @@ def test_process_member_run_rejects_probability_products_with_grib_output(tmp_pa
             start_step=0,
             write_probability_products=True,
         )
+
+
+def test_process_member_run_reuses_only_verified_netcdf_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run = FdbRun(
+        date="20260531",
+        time="1800",
+        model="icon-ch1-eps",
+        member="000",
+        type="cf",
+        number=None,
+        max_step=1,
+    )
+    destination = member_netcdf_path(tmp_path, "ICON-CH1-EPS", run.date, run.time, run.member, 1)
+    write_member_ptype_netcdf(
+        destination,
+        ptype=np.array([[1, 5]], dtype=np.int32),
+        attrs={
+            "model": "ICON-CH1-EPS",
+            "date": run.date,
+            "time": run.time,
+            "member": run.member,
+            "step": 1,
+            "diagnostic_algorithm": "firdewsa",
+        },
+    )
+    monkeypatch.setattr("precip_type_diag.operational._configure_meteoswiss_definitions", lambda: None)
+
+    result = process_member_run(
+        run=run,
+        output_root=tmp_path,
+        output_model="ICON-CH1-EPS",
+        chunk_size=2,
+        prefetch=False,
+        check_inputs=True,
+        precip_mask_threshold_mm=0.0,
+        vertical_cutoff_m=12000.0,
+        start_step=1,
+        output_format="netcdf",
+    )
+
+    assert result["resumed"] is True
+    assert result["reused"] == 1
+    assert result["newly_written"] == 0
+    assert result["fdb_request_count"] == 0
+
+
+def test_grib_resume_requires_matching_cycle_and_step_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "lfff00010000.ptype.grib2"
+    path.touch()
+    monkeypatch.setattr("precip_type_diag.operational.read_categorical_grib", lambda path: None)
+    metadata = {
+        "shortName": "PTYPE",
+        "paramId": 502712,
+        "dataDate": 20100101,
+        "dataTime": 0,
+        "endStep": 1,
+    }
+    monkeypatch.setattr("precip_type_diag.operational.read_grib_metadata", lambda path, keys: metadata)
+
+    assert _valid_existing_member_output(
+        path,
+        model="ICON-REA-L-CH1",
+        date="20100101",
+        time_value="0000",
+        member="000",
+        step=1,
+        algorithm="firdewsa",
+        output_format="grib2",
+        require_diagnostics=False,
+    )
+    metadata["endStep"] = 2
+    assert not _valid_existing_member_output(
+        path,
+        model="ICON-REA-L-CH1",
+        date="20100101",
+        time_value="0000",
+        member="000",
+        step=1,
+        algorithm="firdewsa",
+        output_format="grib2",
+        require_diagnostics=False,
+    )
+
+
+def test_run_contract_prevents_algorithm_mixing_and_releases_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("precip_type_diag.operational._configure_meteoswiss_definitions", lambda: None)
+    monkeypatch.setattr("precip_type_diag.operational._warm_diagnostic", lambda *args: None)
+    monkeypatch.setattr(
+        "precip_type_diag.operational._process_member",
+        lambda **kwargs: {
+            "run": {"member": kwargs["member"]},
+            "steps": 1,
+            "written": 1,
+            "timings_s": {},
+            "wall_s": 0.0,
+        },
+    )
+    common = {
+        "model": "ICON-CH1-EPS",
+        "members": ("000",),
+        "date": "20260531",
+        "time_value": "1800",
+        "start_step": 1,
+        "max_step": 1,
+        "output_root": tmp_path,
+        "workers": 1,
+    }
+
+    run_operational(**common)
+    with pytest.raises(RuntimeError, match="contract mismatch"):
+        run_operational(**common, algorithm="icon")
+
+    summary = run_operational(**common)
+    assert summary["run_contract"]["diagnostic_algorithm"] == "firdewsa"
 
 
 def test_run_operational_discovers_latest_complete_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
