@@ -59,7 +59,8 @@ Every accepted release should archive:
 - Git tag and commit SHA;
 - package version from `pyproject.toml`;
 - Python version and dependency versions;
-- realtime FDB `uenv` image name/version;
+- FDB `uenv` image name/version and tested `realtime` / `rea-l-ch1` views;
 - local MeteoSwiss ecCodes definition source, if overridden;
-- Balfrin smoke-test `summary.json` and `monitoring.json`;
+- Balfrin smoke-test `summary.json` and `monitoring.json` for each supported
+  source covered by the release;
 - approval owner and date.

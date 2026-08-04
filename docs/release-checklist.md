@@ -1,23 +1,23 @@
 # Release Checklist
 
-Use this checklist for release candidates and accepted operational tags.
+Complete this record for every candidate and accepted operational tag. Commands
+and interpretation are documented in the [README](../README.md) and
+[release guide](release-and-operations.md).
 
-## Candidate Metadata
+## Candidate
 
-- Release candidate:
-- Git commit:
-- Git tag:
-- Package version:
+- Version / tag:
+- Commit:
+- Clean worktree: yes / no (attach approved diff if no)
 - Python version:
-- FDB `uenv` image and tested views:
+- FDB image and `uenv` version:
+- Tested views: `realtime` / `rea-l-ch1`
 - ecCodes definition source:
 - Release owner:
 - Scientific approver:
 - Operational approver:
 
-## Local Gates
-
-Run from a clean worktree:
+## Automated Gates
 
 ```bash
 python -m pip install -e ".[test,dev]"
@@ -27,13 +27,14 @@ python -m mypy
 PYTHONPATH=src python -m pytest -q
 PYTHONPATH=src python -m precip_type_diag.benchmark
 python -m pip check
+git diff --check
 ```
 
-Expected result: all commands pass. The pytest command enforces the configured
-coverage threshold.
+- Local gate result:
+- GitHub Actions `tests` result:
+- Wheel contents checked, if packaging changed:
 
-For changes to the ICON-adapted path, also record an executable comparison with
-the pinned upstream Fortran source:
+For ICON science changes:
 
 ```bash
 PYTHONPATH=src python tools/verify_icon_fortran.py --icon-repo /path/to/icon-nwp
@@ -41,111 +42,58 @@ PYTHONPATH=src python tools/verify_icon_fortran.py --icon-repo /path/to/icon-nwp
 
 - ICON checkout commit:
 - Fortran source SHA-256:
-- Harness result:
+- Parity result:
 
-## Balfrin Smoke Tests
+## Balfrin Evidence
 
-Run the smoke test once for each operational model. This loop keeps the output
-directories separate:
+Run the README smoke commands from the candidate revision. Use `pp-short` for
+manual jobs that fit its limit.
 
-If the smoke test is submitted through SLURM, use the generally open `pp-short`
-partition and keep the requested wall time below one hour. Do not use restricted
-elevated-rights partitions such as `pp-production`, `pp-prodntc`, or
-`pp-dispntc` for release-candidate smoke tests.
+| Source | Algorithm | Command/log | `summary.json` | `monitoring.json` | Output inspection |
+| --- | --- | --- | --- | --- | --- |
+| CH1 realtime | Firdewsa | | | | |
+| CH2 realtime | Firdewsa | | | | |
+| REA-L-CH1 | Firdewsa | | | | |
+| CH1 realtime | ICON, when required | | | | |
+| CH2 realtime | ICON, when required | | | | |
+| REA-L-CH1 | ICON, when required | | | | |
 
-```bash
-for model in ICON-CH1-EPS ICON-CH2-EPS; do
-  /usr/bin/uenv run --view=realtime fdb/5.21:v1 -- \
-    env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-    .venv-fdb-5.21/bin/python -m precip_type_diag \
-      --model "$model" \
-      --members 000 \
-      --max-step 1 \
-      --max-wall-s 900 \
-      --output-root "/users/$USER/work/ptype-fdb-smoke/$model"
-done
-```
+Required for each executed row:
 
-Record:
+- process exit is zero and `monitoring.json["ok"]` is true;
+- `DONE.json` exists; `RUNNING.json` and `FAILED.json` do not;
+- source, cycle, algorithm, requested members/steps, and fidelity are correct;
+- at least one output has the expected `PTYPE` metadata, shape, step, and codes.
 
-- CH1 command output:
-- CH1 `summary.json`:
-- CH1 `monitoring.json`:
-- CH2 command output:
-- CH2 `summary.json`:
-- CH2 `monitoring.json`:
+For REA, confirm view `rea-l-ch1`, cycle `0000`, and the daily-through-step-24
+accumulation contract. For ICON mode, confirm all three archived grid-scale
+microphysics fields passed completeness checks.
 
-Required result: `monitoring.json["ok"]` is `true`; at least one member output
-file is re-read and checked for `PTYPE` metadata/variable shape and allowed
-category codes.
+## Production-Path Smoke
 
-For dual-mode science or FDB changes, repeat the loop with `--algorithm icon`
-and record `summary.json["algorithm_fidelity"]` for both models.
-
-Run one archived REA-L-CH1 day in its separate view:
+For realtime releases, exercise the DEPL wrapper with a small override:
 
 ```bash
-/usr/bin/uenv run --view=rea-l-ch1 fdb/5.21:v1 -- \
-  env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-  .venv-fdb-5.21/bin/python -m precip_type_diag \
-    --model ICON-REA-L-CH1 \
-    --date 20100101 \
-    --time 0000 \
-    --members 000 \
-    --max-step 1 \
-    --max-wall-s 900 \
-    --output-root /users/$USER/work/ptype-fdb-smoke/ICON-REA-L-CH1
+tools/run_depl_cycle.sh ICON-CH2-EPS YYYYMMDD HH \
+  /users/$USER/work/ptype-fdb-depl-smoke --members 000 --max-step 1
 ```
 
-- REA-L-CH1 command output:
-- REA-L-CH1 `summary.json` and `fdb_source`:
-- REA-L-CH1 `monitoring.json`:
+- Wrapper command and JSON log:
+- Summary / monitoring / final marker:
+- Probability NetCDF for the tested step:
 
-Repeat with `--algorithm icon` for dual-mode science or FDB changes. Confirm
-the source contract is `rea-l-ch1`, the cycle is `0000`, and the accumulation
-contract is daily through step 24.
+## Decision and Rollback
 
-## DEPL-Style Production Smoke
+- Release decision and date:
+- Accepted tag:
+- Previous accepted tag:
+- Previous runtime record:
+- Product publication boundary:
+- Rollback command/location:
 
-Run one explicit-cycle smoke with the wrapper used by DEPL:
-
-```bash
-tools/run_depl_cycle.sh ICON-CH2-EPS YYYYMMDD HH /users/$USER/work/ptype-fdb-depl-smoke --members 000 --max-step 1
-```
-
-The final two options deliberately override the wrapper's all-member,
-full-forecast defaults to keep this smoke test small.
-
-If submitted through SLURM, use the generally open `pp-short` partition unless
-the expected runtime requires a longer generally open queue.
-
-Record:
-
-- Wrapper command:
-- JSON log location:
-- `summary.json`:
-- `monitoring.json`:
-- `DONE.json` or `FAILED.json`:
-
-Required result: JSON logs are parseable, `RUNNING.json` is removed at the end,
-`DONE.json` exists, `FAILED.json` does not exist, `monitoring.json["ok"]` is
-`true`, and the probability NetCDF output for the tested step exists.
-
-## Tagging
-
-Tag only after the gates above pass:
+Tag only after acceptance:
 
 ```bash
 git tag -a vX.Y.Z -m "precip_type_diag vX.Y.Z"
 git push origin vX.Y.Z
 ```
-
-Do not tag accepted operational releases from a dirty worktree unless the exact
-diff is archived with the acceptance record.
-
-## Rollback
-
-- Previous accepted tag:
-- Previous dependency/uenv record:
-- Product publication boundary:
-- Rollback command/location:

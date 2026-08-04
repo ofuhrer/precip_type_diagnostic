@@ -1,149 +1,74 @@
 # Release and Operations
 
-This guide is for the person preparing, deploying, or supporting an operational
-release. A release is ready only when four things are recorded together:
+Use [release-checklist.md](release-checklist.md) to record the exact revision,
+runtime, validation evidence, approvals, and rollback target. Setup and smoke
+commands are maintained in the [README](../README.md); source and licensing
+constraints are in [provenance.md](provenance.md).
 
-1. the exact code revision;
-2. the Python and FDB dependency environment;
-3. successful automated checks and Balfrin smoke tests;
-4. an executable rollback plan.
+## Release Gate
 
-Use [release-checklist.md](release-checklist.md) as the release-candidate record
-template rather than collecting this evidence informally. Use
-[provenance.md](provenance.md) for source and licensing notes. Setup and first
-run instructions are in the [README](../README.md).
+Before tagging or promoting:
 
-## Pre-Release Gate
-
-Before tagging a release:
-
-1. Run local checks:
-
-   ```bash
-   python -m pip install -e ".[test,dev]"
-   python -m py_compile src/precip_type_diag/*.py test/*.py
-   python -m ruff check .
-   python -m mypy
-   PYTHONPATH=src python -m pytest -q
-   PYTHONPATH=src python -m precip_type_diag.benchmark
-   python -m pip check
-   ```
-
-   When the ICON-adapted science changes, also execute the pinned Fortran
-   comparison against an ICON checkout:
+1. Run the complete local gate from the README in a clean worktree and confirm
+   the GitHub Actions `tests` workflow passes.
+2. If ICON science changed, run the pinned executable Fortran comparison:
 
    ```bash
    PYTHONPATH=src python tools/verify_icon_fortran.py --icon-repo /path/to/icon-nwp
    ```
 
-2. Confirm the GitHub Actions `tests` workflow passes for the release branch.
-3. Run a Balfrin FDB smoke test for each realtime operational model:
+3. If packaging changed, build a wheel and confirm the ecCodes definition files
+   are included.
+4. Run Balfrin smoke tests from the candidate revision for CH1, CH2, and one
+   explicit REA-L-CH1 day. Test both algorithms for science or FDB changes.
+5. Re-read at least one output per source and verify `PTYPE` metadata, shape,
+   step, and allowed category codes. Require `monitoring.json["ok"] == true`.
+6. Archive commands, logs, `summary.json`, `monitoring.json`, runtime versions,
+   and scientific/operational approvals with the release decision.
 
-   ```bash
-   /usr/bin/uenv run --view=realtime fdb/5.21:v1 -- \
-     env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-     .venv-fdb-5.21/bin/python -m precip_type_diag \
-     --model ICON-CH2-EPS \
-     --members 000 \
-     --max-step 1 \
-     --max-wall-s 900 \
-     --output-root /users/$USER/work/ptype-fdb-smoke
-   ```
+Do not promote output from a dirty worktree unless its exact diff is archived
+and approved.
 
-   The command shows CH2. Repeat it with `--model ICON-CH1-EPS` and a separate
-   output directory. For dual-mode science or FDB changes, repeat both model
-   checks with `--algorithm icon` and confirm the archived rain, snow, and
-   graupel accumulations pass completeness checks. The
-   [release checklist](release-checklist.md) provides a loop that runs both models.
+## Versioning and Provenance
 
-   The tested `fdb/5.21:v1` setup uses the system `/usr/bin/uenv` client and a
-   separate `.venv-fdb-5.21` for Numba 0.66 while exposing the FDB image's
-   Python packages first on `PYTHONPATH`.
-
-   Also test one explicit REA-L-CH1 day in the archive view:
-
-   ```bash
-   /usr/bin/uenv run --view=rea-l-ch1 fdb/5.21:v1 -- \
-     env PYTHONPATH=/user-environment/venvs/fdb/lib/python3.11/site-packages:src \
-     .venv-fdb-5.21/bin/python -m precip_type_diag \
-     --model ICON-REA-L-CH1 --date 20100101 --time 0000 \
-     --members 000 --max-step 1 --max-wall-s 900 \
-     --output-root /users/$USER/work/ptype-fdb-rea-l-smoke
-   ```
-
-   Repeat this command with `--algorithm icon` for dual-mode or FDB changes.
-   Confirm the summary records the `rea-l-ch1` view and the daily accumulation
-   contract.
-
-4. Re-read at least one smoke-test member output and check `PTYPE` metadata,
-   shape, and allowed category codes. For the default smoke test this is a GRIB2
-   file; for `--output-format=netcdf`, inspect the NetCDF `ptype` variable.
-5. Confirm `monitoring.json["ok"]` is `true` and archive `summary.json`,
-   `monitoring.json`, command output, and data owner approval with the release
-   decision.
-
-## Versioning
-
-Use annotated Git tags for released code:
+Update the package version in `pyproject.toml`, then create an annotated tag:
 
 ```bash
 git tag -a vX.Y.Z -m "precip_type_diag vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
-The package version in `pyproject.toml` must be updated for any release
-candidate or accepted production release. The operational summary records:
-
-- Python implementation and version;
-- operating system summary;
-- package versions for the runtime dependencies;
-- Git commit, branch, and dirty-worktree flag when available;
-- command-line arguments;
-- selected diagnostic algorithm, effective trace threshold, and known ICON
-  archived-microphysics fidelity limits.
-
-Do not promote output generated from a dirty worktree unless the exact diff is
-archived and approved.
-
-The repository source code is licensed under the BSD 3-Clause License in
-`LICENSE`. Confirm redistribution rights for bundled background PDFs before any
-external release or public artifact publication that includes `background/`.
+`summary.json` records Python/platform and dependency versions, Git revision and
+dirty state, arguments, FDB source, algorithm, mask, and ICON fidelity limits.
+Keep the tested uenv image and view with the release record.
 
 ## Deployment
 
-The production path is the module or console entry point:
+Run the module or console entry point inside the matching FDB view:
 
 ```bash
 python -m precip_type_diag ...
 precip-type-diag ...
 ```
 
-Run inside the documented `realtime` or `rea-l-ch1` FDB uenv view and keep the
-uenv image version with the release record. If the FDB image changes, rerun
-smoke tests before promotion. The DEPL wrapper remains realtime-only; invoke
-the module directly for explicitly dated REA-L-CH1 days.
+The reviewed Balfrin runtime is `/usr/bin/uenv` 8+ with `fdb/5.21:v1`, the FDB
+site-packages first on `PYTHONPATH`, and the project venv described in the
+README. Re-run live smokes whenever the image or environment changes.
 
-For DEPL-triggered production, keep cycle selection outside the diagnostic. The
-notification service should call the explicit wrapper with model, date, time,
-and output root:
+For a scheduler-selected realtime cycle:
 
 ```bash
 tools/run_depl_cycle.sh ICON-CH2-EPS 20260531 18 /users/$USER/work/ptype-fdb
 ```
 
-The wrapper runs the Python module with explicit options for the operational
-product set: all members, `--workers 8`, `--chunk-size 2`,
-`--output-format netcdf`, `--write-probability-products`, JSON INFO logging,
-and three bounded FDB retries. It intentionally does not submit to SLURM or
-choose a partition; scheduling remains owned by DEPL.
+The wrapper is limited to CH1/CH2 realtime forecasts. It selects all members,
+8 workers, 2-hour chunks, NetCDF probabilities, JSON INFO logs, and three
+bounded FDB retries. It does not submit a job or choose a partition. Invoke the
+module directly in `--view=rea-l-ch1` for an explicit REA day.
 
-For manual Balfrin SLURM smoke, benchmark, or validation jobs, use the generally
-open service-node partition `pp-short` when the expected runtime fits below its
-one-hour limit. Avoid elevated-rights partitions such as `pp-production`,
-`pp-prodntc`, and `pp-dispntc` for development or benchmarking runs; they are
-restricted by group and should not be the default for this project.
-
-Minimal `sbatch` wrapper for a manually submitted DEPL-style cycle:
+For manual Balfrin validation, use the generally open `pp-short` partition when
+the job fits its one-hour limit. Restricted production partitions are not the
+default for development or release smokes. A minimal submission is:
 
 ```bash
 #!/usr/bin/env bash
@@ -158,56 +83,32 @@ cd /users/$USER/work/precip_type_diagnostic
 tools/run_depl_cycle.sh "$MODEL" "$DATE" "$TIME" "$OUTPUT_ROOT"
 ```
 
-For `fdb/5.21:v1`, use `/usr/bin/uenv` version 8 or newer and create
-`.venv-fdb-5.21` inside the uenv. Install Numba 0.66 and this package with
-`--no-deps`, then run `pip check` with the documented FDB site-packages on
-`PYTHONPATH`. The FDB image's Python environment cannot be inherited by a
-nested venv through `--system-site-packages`. This arrangement preserves the
-reviewed FDB uenv stack—Python 3.11, NumPy 2.4, Earthkit 1.0, ecCodes 2.47, and
-NetCDF4 1.7—while adding the accelerated diagnostic backend. A legacy
-user-installed `activate-uenv` must not shadow `/usr/bin/uenv`.
-
 ## Monitoring
 
-Every run writes:
+Each run directory contains:
 
-- `<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/summary.json`
-- `<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/monitoring.json`
-- `<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/RUNNING.json`, then either
-  `DONE.json` or `FAILED.json`
+- `summary.json`: selection, outputs, failures, data quality, timings, retries,
+  FDB source, algorithm fidelity, and provenance;
+- `monitoring.json`: scheduler-facing status and recommended exit code;
+- `RUNNING.json`, atomically replaced by `DONE.json` or `FAILED.json`.
 
-`monitoring.json` is the scheduler/dashboard contract. It contains `status`,
-`ok`, `recommended_exit_code`, observed/expected counts, and critical alerts for:
+Monitoring is critical when a member is missing/failed/incomplete, fatal data
+quality is non-zero, expected files are absent, requested probability generation
+fails, FDB retries are exhausted, or the configured wall limit is exceeded. A
+critical status produces a non-zero process exit.
 
-- non-empty `summary.json["failed"]`;
-- requested members with no processed or failed result;
-- processed members whose step count or written member-output count is not
-  `max_step - start_step + 1`;
-- non-zero fatal data-quality counters for precipitation or active columns;
-- wall-clock runtime above `--max-wall-s`, when configured;
-- missing expected member output files, unless `--no-output-file-check` is used;
-- failed requested probability-product generation, when
-  `--write-probability-products` is used;
-- exhausted transient FDB retries.
+Use `--monitoring-json` for an additional scheduler-facing copy and
+`--log-format json` for machine-readable logs. Start incident review with
+`monitoring.json`, then inspect its alerts, `summary.json["failed"]`, retry
+counters, and the run log.
 
-The CLI exits with `monitoring.json["recommended_exit_code"]`, so any critical
-monitoring alert produces a non-zero process exit. Use `--monitoring-json` to
-write an extra copy to a scheduler-specific location. The Python logger
-`precip_type_diag.operational` emits run start, discovery, retries, per-step
-progress, member failure, member completion, probability generation, and run
-completion records. Use `--log-format json` for machine ingestion and route the
-logs plus monitoring JSON into the normal batch scheduler or monitoring system.
-
-FDB retries are deliberately narrow: they cover transient `fdb-utils list`, FDB
-field retrieval, and field materialization/decode failures. Deterministic
-science or validation failures, incomplete FDB contents after successful
-listing, invalid shapes, invalid category codes, and strict probability
-completeness failures are not retried.
+Retries are intentionally limited to transient FDB listing, retrieval, and
+decode/materialization failures. Invalid data, shapes, categories, incomplete
+FDB content, and strict probability failures are not retried.
 
 ## Rollback
 
-Rollback means rerunning the previous accepted Git tag with its recorded
-dependency/uenv environment and replacing the candidate output tree atomically at
-the product publication boundary. Keep previous release tags and operational
-records available until the new release has completed the agreed retention
-period.
+Run the previous accepted tag in its recorded runtime, verify it with the same
+smoke contract, and replace candidate products atomically at the publication
+boundary. Retain the previous tag, runtime record, and outputs until the new
+release completes its agreed retention period.

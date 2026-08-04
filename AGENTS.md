@@ -1,114 +1,76 @@
 # AGENTS.md
 
-## Mission
+## Purpose
 
-`precip_type_diag` is the MeteoSwiss dual-mode categorical precipitation-type diagnostic
-for `ICON-CH1-EPS` and `ICON-CH2-EPS`. It implements Firdewsa Zukanovic's MSc
-thesis method, based on the Modified Bourgouin algorithm.
+`precip_type_diag` is the MeteoSwiss FDB-only precipitation-type diagnostic for
+`ICON-CH1-EPS`, `ICON-CH2-EPS`, and deterministic `ICON-REA-L-CH1`. It runs on
+Balfrin and offers two modes:
 
-The default `firdewsa` mode preserves that implementation. The optional `icon`
-mode follows ICON commit `50da7c5924994f7626688eb5185b8e66c781b12e` as closely
-as the archived offline inputs allow.
+- `firdewsa` (default): thesis-faithful Modified Bourgouin implementation.
+- `icon`: offline adaptation pinned to ICON commit
+  `50da7c5924994f7626688eb5185b8e66c781b12e`.
 
-Production is FDB-only and runs on Balfrin. It writes one categorical `PTYPE`
-field per requested member and forecast hour, operational JSON, and a run-state
-marker. GRIB2 is the default member format. NetCDF is optional and required for
-ensemble probability products.
+Member output is categorical `PTYPE` in GRIB2 (default) or NetCDF. Ensemble
+probabilities require NetCDF.
 
-## Start of Every Task
+## Before Editing
 
-1. Read `README.md` for setup and operator workflows.
-2. Read `docs/science-and-architecture.md` before changing science, data
-   contracts, formats, or orchestration.
-3. Check `git status` and preserve unrelated worktree changes.
-4. Use the codebase knowledge graph for code discovery: `search_graph`, then
-   `trace_path`, then `get_code_snippet`. Use text search for literals,
-   configuration, shell scripts, and documentation.
-5. Identify the smallest relevant validation tier before editing.
+1. Read `README.md`; read `docs/science-and-architecture.md` for science, FDB,
+   format, or orchestration changes.
+2. Check `git status` and preserve unrelated work.
+3. For code discovery, use the knowledge graph in this order: `search_graph`,
+   `trace_path`, `get_code_snippet`. Use text search for literals, scripts,
+   configuration, and documentation.
+4. Choose focused tests before changing code.
 
-Additional references:
+Operational guidance is in `docs/release-and-operations.md`; release evidence
+belongs in `docs/release-checklist.md`; source and licensing notes are in
+`docs/provenance.md`.
 
-- `docs/release-and-operations.md`: promotion, monitoring, and rollback.
-- `docs/release-checklist.md`: release evidence template.
-- `docs/provenance.md`: sources, licensing, and bundled PDFs.
+## Authoritative Code
 
-## Source Map
+- `profile.py` / `numba_backend.py`: Firdewsa reference and accelerated path.
+- `icon_profile.py` / `icon_numba_backend.py`: ICON scalar reference and
+  accelerated path.
+- `grid.py`: array validation and grid diagnosis.
+- `operational.py`: FDB contracts, retrieval, processing, output, and summaries.
+- `gribio.py`, `netcdfio.py`, `probabilities.py`: product formats and aggregation.
+- `monitoring.py`: operational status and exit contract.
+- `definitions/`: packaged ecCodes `PTYPE` overlay.
+- `tools/run_depl_cycle.sh`: realtime fixed-cycle wrapper; it does not submit jobs.
 
-- `profile.py`: authoritative pure-Python column algorithm.
-- `numba_backend.py`: accelerated categorical and microphysics-probability
-  implementation; must remain behaviorally aligned with `profile.py`.
-- `icon_profile.py`: authoritative scalar reference for the ICON-adapted mode.
-- `icon_numba_backend.py`: accelerated ICON implementation; must remain aligned
-  with `icon_profile.py` and the pinned Fortran reference vectors.
-- `grid.py`: array preparation, active-column selection, and grid diagnosis.
-- `operational.py`: FDB discovery/checks/retrieval, retries, prefetching,
-  multiprocessing, run markers, and summaries.
-- `gribio.py`: ecCodes definitions, vertical truncation, and GRIB2 writing.
-- `netcdfio.py`: atomic generic NetCDF read/write helpers.
-- `probabilities.py`: member NetCDF schema and strict ensemble aggregation.
-- `monitoring.py`: operational status and alert evaluation.
-- `provenance.py`: runtime, dependency, and Git provenance.
-- `definitions/`: packaged local ecCodes overlay for `PTYPE`.
-- `tools/run_depl_cycle.sh`: fixed-cycle DEPL wrapper; it does not submit jobs.
-- `test/`: synthetic science tests and mocked orchestration tests. No real GRIB
-  fixture data or fixture-fetch path exists.
+## Contracts to Preserve
 
-## Non-Negotiable Contracts
+- Scientific constants and behavior change only for a demonstrated bug or an
+  explicit scientific decision. Optimized paths must match their scalar
+  references; ICON science changes also require the executable Fortran harness.
+- Preserve category codes `0, 1, 3, 5, 6, 7, 8, 9, 10, 12, 13`, GRIB metadata,
+  and the `summary.json` contract unless the product contract changes explicitly.
+- Required fields are `T`, `P`, `QV`, `HHL`, `TOT_PREC`, and `T_G`; ICON mode also
+  needs `RAIN_GSP`, `SNOW_GSP`, and `GRAU_GSP`. Missing convective and hail rates
+  remain explicit fidelity limitations.
+- Hourly amounts are adjacent accumulation differences. Realtime accumulations
+  start at the forecast cycle; REA-L-CH1 accumulates from its daily `0000` cycle
+  through step 24 and must never cross a day boundary.
+- CH1: members `000..010`, step 33. CH2: `000..020`, step 120. REA-L-CH1:
+  member `000`, step 24, explicit date and `time=0000`.
+- Default processing uses step 1 onward, 8 member workers, 2-hour chunks,
+  prefetch, and GRIB2. Probability aggregation is strict across requested
+  members and uses percent values (`0..100`).
+- Fail visibly on deterministic science, shape, validation, and completeness
+  errors. Retry only transient FDB list, retrieve, and decode failures.
+- Runs publish `RUNNING.json`, then atomically `DONE.json` or `FAILED.json`;
+  critical monitoring alerts must return a non-zero CLI exit.
+- Do not change dependencies, ecCodes definitions, the 12 km cutoff, masks, or
+  probability thresholds without production justification and appropriate
+  scientific/operational review.
 
-- Keep scientific behavior thesis-faithful unless correcting a demonstrated
-  bug. Do not tune constants or thresholds opportunistically.
-- Preserve category codes `0, 1, 3, 5, 6, 7, 8, 9, 10, 12, 13`, GRIB metadata, and the
-  `summary.json` contract unless an explicit product decision changes them.
-- Treat `profile.py` as the Firdewsa reference and `icon_profile.py` as the ICON
-  reference. Any optimized path change requires focused reference-parity tests;
-  ICON science changes also require the executable Fortran harness.
-- Do not casually change `definitions/`, the 12 km `HHL` cutoff, probability
-  thresholds, or precipitation masks; these require scientific and operational
-  review.
-- Do not add broad silent fallbacks. Infrastructure failures may be retried or
-  recorded per member; deterministic science, shape, validation, and strict
-  completeness failures must remain visible.
-- Do not add dependencies without a production justification and a Balfrin
-  compatibility check.
-
-## Operational Contract
-
-- Required FDB fields: `T`, `P`, `QV`, `HHL`, `TOT_PREC`, `T_G`.
-- ICON mode additionally requires archived `RAIN_GSP`, `SNOW_GSP`, and
-  `GRAU_GSP` accumulations. Unavailable convective rain/snow and hail rates must
-  remain explicit fidelity limitations rather than silent fallbacks.
-- Hourly precipitation is `TOT_PREC(current) - TOT_PREC(previous)`.
-- Default production starts at step 1; step 0 supplies only the first previous
-  accumulated-precipitation field.
-- CH1 has members `000..010` and max step 33. CH2 has members `000..020` and max
-  step 120.
-- Defaults: 8 member workers, 2-hour chunks, prefetch enabled, GRIB2 output.
-- Probability aggregation is strict across every requested member. Values use
-  percent scale `0..100`; thresholded intensity uses 30% probability and a
-  `0.01 mm/h` precipitation mask.
-- Critical monitoring alerts produce a non-zero CLI exit. Runs publish
-  `RUNNING.json`, then `DONE.json` or `FAILED.json` atomically.
-- Retries cover transient FDB list, retrieve, and decode/materialization
-  failures only.
-- Manual Balfrin development jobs should use the generally open `pp-short`
-  partition when they fit its limit. Do not default to restricted production
-  partitions.
-
-## Known Boundaries
-
-- There is no file-based production input path, plotting layer, bias correction,
-  or station postprocessing.
-- NetCDF currently records generic `cell` or `y/x` dimensions without
-  geospatial coordinate variables or a grid mapping. Adding those is a product
-  contract change, not a cosmetic refactor.
-- Background PDFs are review material, not runtime package data. Preserve their
-  provenance and do not assume redistribution rights.
-- Real FDB verification is manual on Balfrin; CI must remain synthetic/mocked.
+Real FDB tests are manual on Balfrin; CI stays synthetic and mocked. There is no
+file-input production path, plotting, bias correction, or station processing.
 
 ## Validation
 
-Focused tests are acceptable during iteration. Before handoff, commit, or push,
-run the complete local gate:
+Use focused tests while iterating. Before handoff, commit, or push, run:
 
 ```bash
 python -m py_compile src/precip_type_diag/*.py test/*.py
@@ -120,19 +82,13 @@ python -m pip check
 git diff --check
 ```
 
-For changes to packaging, also build a wheel and confirm the ecCodes definition
-files are present. For production-facing changes, run the Balfrin smoke commands
-from `README.md`; formal releases test both models from the candidate tag.
+Also build and inspect a wheel after packaging changes. Run the README Balfrin
+smokes after production-facing changes; dual-mode releases cover all three
+models. Use `pp-short` for manual jobs that fit its limit.
 
 ## Change Hygiene
 
-- Keep generated caches, virtual environments, build artifacts, operational
-  outputs, logs, secrets, SSH material, and machine-specific paths out of Git.
-- Make the narrowest coherent change; avoid mixing scientific changes with
-  mechanical refactors.
-- Add regression tests for every fixed bug and verify public CLI errors at both
-  programmatic and command-line boundaries where relevant.
-- Update operator docs when defaults, environment requirements, output layouts,
-  monitoring behavior, or wrapper arguments change.
-- Before committing, inspect the complete diff, verify package-data changes,
-  and split unrelated concerns into focused commits.
+Keep changes narrow, add regression tests for bugs, update operator docs when a
+public or operational contract changes, and inspect the complete diff before
+committing. Never commit generated outputs, environments, caches, logs, secrets,
+SSH material, or machine-specific paths.
