@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from .constants import DEFAULT_VERTICAL_CUTOFF_M
-from .operational import MODEL_MAX_STEP, MODEL_TO_FDB, OUTPUT_FORMATS, parse_members, run_operational
+from .operational import (
+    MODEL_MAX_STEP,
+    MODEL_TO_FDB,
+    OUTPUT_FORMATS,
+    parse_members,
+    run_operational,
+    validate_run_date_time,
+)
 
 
 class JsonLogFormatter(logging.Formatter):
@@ -95,6 +102,11 @@ def main() -> int:
 
     if (args.date is None) != (args.time_value is None):
         parser.error("--date and --time must be provided together")
+    if args.date is not None and args.time_value is not None:
+        try:
+            validate_run_date_time(args.date, args.time_value)
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.max_step is not None and args.max_step < 0:
         parser.error(f"--max-step must be non-negative, got {args.max_step}")
     if args.start_step < 0:

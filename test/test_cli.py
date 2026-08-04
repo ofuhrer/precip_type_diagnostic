@@ -148,6 +148,48 @@ def test_cli_requires_date_and_time_together(monkeypatch: pytest.MonkeyPatch) ->
     assert exc_info.value.code == 2
 
 
+def test_cli_rejects_invalid_fixed_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "precip_type_diag",
+            "--model",
+            "ICON-CH2-EPS",
+            "--output-root",
+            "/products",
+            "--date",
+            "../escape",
+            "--time",
+            "1800",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 2
+
+
+def test_cli_rejects_duplicate_members(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "precip_type_diag",
+            "--model",
+            "ICON-CH2-EPS",
+            "--output-root",
+            "/products",
+            "--members",
+            "000,000",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 2
+
+
 def test_cli_returns_failure_when_any_member_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "precip_type_diag.__main__.run_operational",

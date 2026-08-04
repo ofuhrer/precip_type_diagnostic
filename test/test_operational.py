@@ -29,6 +29,7 @@ from precip_type_diag.operational import (
     process_member_run,
     retry_config_from_options,
     run_operational,
+    validate_run_date_time,
 )
 
 
@@ -69,6 +70,21 @@ def test_parse_members_rejects_unknown_model_members() -> None:
         parse_members("0", "ICON-CH1-EPS")
     with pytest.raises(ValueError, match="not available"):
         parse_members("011", "ICON-CH1-EPS")
+    with pytest.raises(ValueError, match=r"Duplicate member\(s\): 000"):
+        parse_members("000,000", "ICON-CH1-EPS")
+
+
+def test_validate_run_date_time() -> None:
+    validate_run_date_time("20260228", "2359")
+
+    with pytest.raises(ValueError, match="YYYYMMDD"):
+        validate_run_date_time("2026-02-28", "1800")
+    with pytest.raises(ValueError, match="valid calendar date"):
+        validate_run_date_time("20260229", "1800")
+    with pytest.raises(ValueError, match="HHMM"):
+        validate_run_date_time("20260228", "18")
+    with pytest.raises(ValueError, match="valid 24-hour time"):
+        validate_run_date_time("20260228", "2400")
 
 
 def test_field_grouping_uses_metadata_step_and_param() -> None:
@@ -429,6 +445,8 @@ def test_config_for_model_rejects_invalid_values() -> None:
         config_for_model("ICON-CH1-EPS", chunk_size=0)
     with pytest.raises(ValueError, match="not available"):
         config_for_model("ICON-CH1-EPS", members=("011",))
+    with pytest.raises(ValueError, match=r"Duplicate member\(s\): 000"):
+        config_for_model("ICON-CH1-EPS", members=("000", "000"))
 
 
 def test_run_operational_rejects_non_positive_monitoring_wall_limit(tmp_path: Path) -> None:
@@ -440,6 +458,17 @@ def test_run_operational_rejects_non_positive_monitoring_wall_limit(tmp_path: Pa
             time_value="1800",
             output_root=tmp_path,
             max_wall_s=0.0,
+        )
+
+
+def test_run_operational_rejects_invalid_fixed_run(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="valid calendar date"):
+        run_operational(
+            model="ICON-CH1-EPS",
+            members=("000",),
+            date="20260229",
+            time_value="1800",
+            output_root=tmp_path,
         )
 
 

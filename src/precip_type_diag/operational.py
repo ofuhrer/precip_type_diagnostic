@@ -240,6 +240,34 @@ def normalize_output_format(value: str) -> str:
     return normalized
 
 
+def validate_run_date_time(date: str, time_value: str) -> None:
+    """Validate fixed FDB run identifiers before using them in requests or paths."""
+    if not re.fullmatch(r"\d{8}", date):
+        raise ValueError(f"date must use YYYYMMDD, got {date!r}")
+    if not re.fullmatch(r"\d{4}", time_value):
+        raise ValueError(f"time_value must use HHMM, got {time_value!r}")
+    try:
+        datetime.strptime(date, "%Y%m%d")
+    except ValueError as exc:
+        raise ValueError(f"date must be a valid calendar date, got {date!r}") from exc
+    try:
+        datetime.strptime(time_value, "%H%M")
+    except ValueError as exc:
+        raise ValueError(f"time_value must be a valid 24-hour time, got {time_value!r}") from exc
+
+
+def _duplicate_members(members: tuple[str, ...]) -> list[str]:
+    seen: set[str] = set()
+    duplicate_set: set[str] = set()
+    duplicates: list[str] = []
+    for member in members:
+        if member in seen and member not in duplicate_set:
+            duplicates.append(member)
+            duplicate_set.add(member)
+        seen.add(member)
+    return duplicates
+
+
 def config_for_model(
     model: str,
     *,
@@ -280,6 +308,9 @@ def config_for_model(
     unknown = [member for member in selected_members if member not in MODEL_MEMBERS[model]]
     if unknown:
         raise ValueError(f"Member(s) not available for {model}: {', '.join(unknown)}")
+    duplicates = _duplicate_members(selected_members)
+    if duplicates:
+        raise ValueError(f"Duplicate member(s): {', '.join(duplicates)}")
 
     return OperationalConfig(
         model=model,
@@ -308,6 +339,9 @@ def parse_members(value: str, model: str) -> tuple[str, ...]:
     unknown = [member for member in members if member not in MODEL_MEMBERS[model]]
     if unknown:
         raise ValueError(f"Member(s) not available for {model}: {', '.join(unknown)}")
+    duplicates = _duplicate_members(members)
+    if duplicates:
+        raise ValueError(f"Duplicate member(s): {', '.join(duplicates)}")
     return members
 
 
@@ -1458,6 +1492,8 @@ def run_operational(
 ) -> dict[str, object]:
     if (date is None) != (time_value is None):
         raise ValueError("date and time_value must be provided together")
+    if date is not None and time_value is not None:
+        validate_run_date_time(date, time_value)
     if max_wall_s is not None and max_wall_s <= 0:
         raise ValueError(f"max_wall_s must be positive, got {max_wall_s}")
     if attempt is not None and attempt < 1:
