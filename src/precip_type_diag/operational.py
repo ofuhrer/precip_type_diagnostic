@@ -169,6 +169,8 @@ def expected_cycle_max_step(model: str, time_value: str) -> int:
 DATA_QUALITY_KEYS = (
     "total_columns",
     "active_columns",
+    "clamped_negative_total_precip_deltas",
+    "clamped_negative_icon_microphysics_deltas",
     "invalid_total_precip_columns",
     "invalid_ground_temperature_columns",
     "invalid_profile_columns",
@@ -953,6 +955,17 @@ def _field_to_numpy(
     )
 
 
+def _nonnegative_accumulation_amount(
+    current: np.ndarray,
+    previous: np.ndarray | None,
+) -> tuple[np.ndarray, int]:
+    """Return a within-cycle accumulation difference without nonphysical negatives."""
+
+    amount = current if previous is None else current - previous
+    negative_count = int(np.count_nonzero(amount < 0.0))
+    return np.maximum(amount, 0.0), negative_count
+
+
 def _level(field: FieldLike) -> int:
     return int(float(str(field.metadata("level"))))
 
@@ -1275,9 +1288,12 @@ def _process_chunk(
             flatten=False,
         )
         timings.decode_ground_temperature_s += time.perf_counter() - ground_temperature_decode_start
-        total_precip_mm = total_precip_current if previous_total_precip is None else total_precip_current - previous_total_precip
+        total_precip_mm, negative_total_precip_count = _nonnegative_accumulation_amount(
+            total_precip_current,
+            previous_total_precip,
+        )
+        data_quality["clamped_negative_total_precip_deltas"] += negative_total_precip_count
         if algorithm == ALGORITHM_ICON:
-            total_precip_mm = np.where(total_precip_mm < 0.0, total_precip_current, total_precip_mm)
             if chunk.microphysics_accumulations_by_step is None:
                 raise RuntimeError("ICON mode requires archived microphysics accumulation fields")
             microphysics_decode_start = time.perf_counter()
@@ -1294,8 +1310,8 @@ def _process_chunk(
                     flatten=False,
                 )
                 previous = icon_accumulation_state.get(name)
-                amount = current if previous is None else current - previous
-                amount = np.where(amount < 0.0, current, amount)
+                amount, negative_component_count = _nonnegative_accumulation_amount(current, previous)
+                data_quality["clamped_negative_icon_microphysics_deltas"] += negative_component_count
                 current_icon_accumulations[name] = current
                 icon_rates[name] = amount / 3600.0
             timings.decode_microphysics_s += time.perf_counter() - microphysics_decode_start

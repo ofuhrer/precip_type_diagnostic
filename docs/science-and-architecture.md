@@ -20,7 +20,8 @@ Bourgouin method. `profile.py` is the scalar reference;
 [`50da7c5924994f7626688eb5185b8e66c781b12e`](https://gitlab.dkrz.de/icon/icon-nwp/-/commit/50da7c5924994f7626688eb5185b8e66c781b12e).
 It uses ICON thermodynamic formulas, interface-height layer depths,
 zero-crossing energy integration, ICON thresholds, an interval-scaled trace
-mask, accumulator-reset handling, and archived surface microphysics.
+mask, packing-safe accumulation differencing, and archived surface
+microphysics.
 `icon_profile.py` is the scalar reference and `icon_numba_backend.py` is the
 accelerated path. Frozen vectors and the executable Fortran harness pin parity
 to the cited commit.
@@ -73,8 +74,15 @@ ICON mode also requires these accumulated grid-scale fields:
 | `GRAU_GSP` | `500146` | graupel |
 
 Hourly precipitation is `TOT_PREC(current) - TOT_PREC(previous)`. ICON surface
-rates use the same adjacent-step difference divided by 3600 seconds. A negative
-delta is treated as an accumulator reset and uses the current value.
+rates use the same adjacent-step difference divided by 3600 seconds. The
+accumulation contract is monotonic within a forecast or daily reanalysis cycle,
+but adjacent GRIB messages are packed independently and can decode to a small
+negative difference. Negative differences are nonphysical and are clamped to
+zero for `TOT_PREC`, `RAIN_GSP`, `SNOW_GSP`, and `GRAU_GSP`. They are never
+replaced by the current accumulator: doing so would turn packing noise into a
+spurious hourly amount. Clamp counts are preserved in `summary.json` for both
+realtime and REA processing so an actual upstream contract violation remains
+observable.
 
 Realtime accumulations start at the model forecast cycle. REA-L accumulations
 start at its daily 00 UTC cycle and end at step 24. Cycle `D`, step 24 is valid
@@ -185,7 +193,9 @@ member. Its thresholded intensity uses a 30% probability threshold and a
 The accepted wrappers intentionally narrow these generic defaults: realtime EPS
 uses all members, NetCDF diagnostics, and probability products; REA backfills
 use member `000`, steps `1..24`, and categorical GRIB2. Both use Firdewsa unless
-an explicitly reviewed campaign selects `icon`.
+an explicitly reviewed campaign selects `icon`. The reviewed REA workflow in
+the README selects ICON mode explicitly to match the online diagnostic as
+closely as the archived rate components allow.
 
 ## Verification
 

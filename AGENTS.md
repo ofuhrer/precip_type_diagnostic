@@ -59,7 +59,11 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
   remain explicit fidelity limitations.
 - Hourly amounts are adjacent accumulation differences. Realtime accumulations
   start at the forecast cycle; REA-L-CH1 accumulates from its daily `0000` cycle
-  through step 24 and must never cross a day boundary.
+  through step 24 and must never cross a day boundary. A negative within-cycle
+  difference is nonphysical: clamp it to zero and count it in data quality for
+  `TOT_PREC` and ICON's archived microphysics; never substitute the current
+  accumulator as a reset amount. Small decreases can be GRIB packing noise;
+  unexpected counts require upstream review.
 - CH1: members `000..010`, maximum step 45; current `0300` cycles use 45
   and other cycles use 33. CH2: `000..020`, step 120. REA-L-CH1:
   member `000`, step 24, explicit date and `time=0000`.

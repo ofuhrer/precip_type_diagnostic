@@ -102,6 +102,7 @@ STAGING_ROOT=$SCRATCH/ptype-rea-campaign
 ARCHIVE_ROOT=/store_new/mch/msopr/$USER/ptype-rea-campaign
 tools/run_balfrin.sh backfill-plan \
   --start-date 20050101 --end-date 20250831 \
+  --algorithm icon \
   --output-root "$ARCHIVE_ROOT" \
   --staging-root "$STAGING_ROOT" \
   --manifest "$CAMPAIGN/manifest.json"
@@ -118,17 +119,17 @@ The manifest is immutable; use a new campaign and output root to change dates,
 algorithm, archive bounds, or missing-date policy. Schema-v1 daily manifests
 remain tied to `v0.3.0` and must be re-planned for the monthly layout.
 
-A complete 31-day Firdewsa month produced 1,708,342,296 bytes and finished in
-1 hour 10 minutes 57 seconds. Its daily science wall times averaged 135.8
+A corrected ICON-mode 31-day month produced 1,708,342,296 bytes and finished in
+1 hour 19 minutes 54 seconds. Its daily science wall times averaged 152.4
 seconds. The `20050101..20250831` calendar range therefore projects to about
 416 GB (`0.38 TiB`) of categorical GRIB2 in 248 monthly archive files and about
-36 hours of ideal wall time with eight concurrent monthly tasks. Including
+40 hours of ideal wall time with eight concurrent monthly tasks. Including
 receipts, locks, Slurm logs, the archive contract, manifest, script, and
 campaign status, the planner projects 249 files in the archive root, 747 in the
 campaign root, and 996 persistent files in total. Require at least `0.5 TiB`
-plus the agreed retention margin and reserve about two days plus queue and retry
-margin. Recalculate from a representative month when packing, grid, algorithm,
-or archive bounds change.
+plus the agreed retention margin and reserve two to three days plus queue and
+retry margin. Recalculate from a representative month when packing, grid,
+algorithm, or archive bounds change.
 
 Check progress cheaply, then verify all outputs before acceptance:
 
@@ -171,6 +172,16 @@ Each core run writes:
   retries, resume counts, algorithm fidelity, and runtime/Git provenance;
 - `monitoring.json`: alerts, status, and recommended exit code;
 - `RUNNING.json`, atomically replaced by `DONE.json` or `FAILED.json`.
+
+Within-cycle accumulators must be monotonic, but independent GRIB packing can
+produce small negative decoded differences. The diagnostic clamps those values
+to zero uniformly for realtime and REA, including ICON's archived rain, snow,
+and graupel components. It records the affected value counts as
+`clamped_negative_total_precip_deltas` and
+`clamped_negative_icon_microphysics_deltas` under `data_quality`. Review
+unexpectedly large values or changes between cycles as an upstream data
+incident; do not reinterpret a negative delta as a reset and substitute the
+full current accumulation.
 
 Monitoring is critical for failed or incomplete members, fatal data quality,
 missing expected files, strict probability failure, exhausted FDB retries, or a
