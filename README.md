@@ -217,5 +217,5 @@ run as scheduled jobs on Balfrin.
 - [Science and architecture](docs/science-and-architecture.md)
 - [Release and operations](docs/release-and-operations.md)
 - [Release checklist](docs/release-checklist.md)
-- [v0.3.0 candidate acceptance evidence](docs/acceptance/2026-08-04-v0.3.0-candidate.md)
+- [v0.3.0 release acceptance evidence](docs/acceptance/2026-08-04-v0.3.0-candidate.md)
 - [Provenance and licensing](docs/provenance.md)
