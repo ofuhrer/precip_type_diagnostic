@@ -79,6 +79,7 @@ STAGING_ROOT=$SCRATCH/ptype-rea-2005-2025
 ARCHIVE_ROOT=/store_new/mch/msopr/$USER/ptype-rea-2005-2025
 tools/run_balfrin.sh backfill-plan \
   --start-date 20050101 --end-date 20250831 \
+  --algorithm icon \
   --output-root "$ARCHIVE_ROOT" \
   --staging-root "$STAGING_ROOT" \
   --manifest "$CAMPAIGN/manifest.json"
@@ -97,11 +98,12 @@ The measured categorical output projects to about `416 GB` (`0.38 TiB`) for
 instead of 181,152 single-message files. Only 249 files land in the archive
 root (248 months plus `ARCHIVE_CONTRACT.json`); 747 receipts, locks, logs, and
 control files remain under the campaign root, for about 996 persistent files in
-total. A complete 31-day January task took 1 hour 11 minutes, averaging 136
-seconds per daily cycle. The default eight-way monthly array therefore projects
-to roughly 36 hours of ideal wall time; budget about two days plus queue and
-retry margin. Reserve at least `0.5 TiB` plus the local retention margin and
-confirm the current long-term mount before launching the full campaign.
+total. A corrected ICON-mode 31-day January task took 1 hour 20 minutes,
+averaging 152 seconds per daily cycle. The default eight-way monthly array
+therefore projects to roughly 40 hours of ideal wall time; budget two to three
+days plus queue and retry margin. Reserve at least `0.5 TiB` plus the local
+retention margin and confirm the current long-term mount before launching the
+full campaign.
 
 Check campaign state with:
 

@@ -193,7 +193,9 @@ member. Its thresholded intensity uses a 30% probability threshold and a
 The accepted wrappers intentionally narrow these generic defaults: realtime EPS
 uses all members, NetCDF diagnostics, and probability products; REA backfills
 use member `000`, steps `1..24`, and categorical GRIB2. Both use Firdewsa unless
-an explicitly reviewed campaign selects `icon`.
+an explicitly reviewed campaign selects `icon`. The reviewed REA workflow in
+the README selects ICON mode explicitly to match the online diagnostic as
+closely as the archived rate components allow.
 
 ## Verification
 
