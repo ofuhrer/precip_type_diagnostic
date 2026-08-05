@@ -126,6 +126,8 @@ The tool therefore treats every cycle independently:
 - cycle `D`, step 1 represents the interval ending at `D 01 UTC`;
 - cycle `D`, step 24 represents the interval ending at `D+1 00 UTC`;
 - hourly values are adjacent differences within cycle `D` only;
+- negative adjacent differences are nonphysical within a cycle and are clamped
+  to zero, with counts retained in `summary.json`;
 - no accumulation is ever differenced across two cycle dates.
 
 Manifest dates are cycle dates, not valid dates. A campaign ending with cycle
@@ -145,7 +147,11 @@ published month.
 The CLI enforces these horizons. Under the reviewed schedule, CH1 `0300` cycles
 use 45 hours and the other cycles use 33; the cycle-specific horizon is recorded
 in `CYCLE.json`. Realtime accumulated fields start at the forecast cycle; REA
-accumulations start at the daily 00 UTC cycle.
+accumulations start at the daily 00 UTC cycle. Neither contract permits an
+accumulator reset inside a cycle. For every model and algorithm, negative
+adjacent differences are therefore clamped to zero rather than replaced by the
+current accumulated value. ICON rain, snow, and graupel component differences
+use the same rule.
 
 ## Outputs and restart contract
 
@@ -213,6 +219,11 @@ run log. For REA, start with `campaign-status.json`, the monthly receipt, and it
 Slurm log.
 Deterministic science, validation, completeness, and output errors fail visibly;
 only transient FDB list, retrieve, and decode failures are retried.
+`data_quality.clamped_negative_total_precip_deltas` and
+`data_quality.clamped_negative_icon_microphysics_deltas` quantify nonphysical
+negative adjacent differences. Small nonzero counts can result from independent
+GRIB packing at adjacent steps; large or changing counts require an upstream
+accumulation review.
 
 - `KeyError: 'activate'` from `uenv`: use `/usr/bin/uenv` version 8 or newer.
 - FDB errors: confirm the `realtime` or `rea-l-ch1` view selected by the wrapper.

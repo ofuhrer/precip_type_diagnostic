@@ -208,7 +208,7 @@ def test_process_chunk_uses_previous_total_precip_for_first_step(monkeypatch: py
                 "QV": [FakeField({"level": 1}, np.array([0.002, 0.002]))],
             }
         },
-        total_precip_by_step={1: FakeField({}, np.array([3.0, 5.0]))},
+        total_precip_by_step={1: FakeField({}, np.array([1.0, 6.0]))},
         ground_temperature_by_step={1: FakeField({}, np.array([273.15, 274.15]))},
         request_s=0.0,
     )
@@ -222,7 +222,7 @@ def test_process_chunk_uses_previous_total_precip_for_first_step(monkeypatch: py
         max_step=1,
     )
 
-    _process_chunk(
+    *_, data_quality = _process_chunk(
         chunk,
         timings=Timings(),
         retained_full_levels=1,
@@ -234,12 +234,24 @@ def test_process_chunk_uses_previous_total_precip_for_first_step(monkeypatch: py
         precip_mask_threshold_mm=0.0,
     )
 
-    np.testing.assert_allclose(captured_total_precip[0], np.array([1.0, 0.0]))
+    np.testing.assert_allclose(captured_total_precip[0], np.array([0.0, 1.0]))
+    assert data_quality["clamped_negative_total_precip_deltas"] == 1
 
 
-def test_icon_process_chunk_derives_archived_rates_and_applies_accumulation_reset(
+@pytest.mark.parametrize(
+    ("fdb_model", "output_model", "time_value"),
+    [
+        ("icon-ch1-eps", "ICON-CH1-EPS", "1800"),
+        ("icon-ch2-eps", "ICON-CH2-EPS", "1200"),
+        ("icon-rea-l-ch1", "ICON-REA-L-CH1", "0000"),
+    ],
+)
+def test_icon_process_chunk_derives_archived_rates_and_clamps_negative_deltas(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    fdb_model: str,
+    output_model: str,
+    time_value: str,
 ) -> None:
     captured: list[GridInputs] = []
 
@@ -289,9 +301,9 @@ def test_icon_process_chunk_derives_archived_rates_and_applies_accumulation_rese
         "SNOW_GSP": np.array([0.1, 0.5]),
         "GRAU_GSP": np.array([0.0, 0.1]),
     }
-    run = FdbRun("20260531", "1800", "icon-ch1-eps", "000", "cf", None, 1)
+    run = FdbRun("20260531", time_value, fdb_model, "000", "cf", None, 1)
 
-    _process_chunk(
+    *_, data_quality = _process_chunk(
         chunk,
         timings=Timings(),
         retained_full_levels=1,
@@ -300,16 +312,18 @@ def test_icon_process_chunk_derives_archived_rates_and_applies_accumulation_rese
         previous_icon_accumulations=previous_components,
         output_root=tmp_path,
         run=run,
-        output_model="ICON-CH1-EPS",
+        output_model=output_model,
         precip_mask_threshold_mm=0.01,
         algorithm="icon",
     )
 
-    np.testing.assert_allclose(captured[0].total_precip_mm, [0.5, 2.0])
-    np.testing.assert_allclose(captured[0].rain_rate_kg_m2_s, np.array([0.2, 1.0]) / 3600.0)
+    np.testing.assert_allclose(captured[0].total_precip_mm, [0.0, 2.0])
+    np.testing.assert_allclose(captured[0].rain_rate_kg_m2_s, np.array([0.0, 1.0]) / 3600.0)
     np.testing.assert_allclose(captured[0].snow_rate_kg_m2_s, np.array([0.3, 0.5]) / 3600.0)
     np.testing.assert_allclose(captured[0].graupel_rate_kg_m2_s, np.array([0.1, 0.5]) / 3600.0)
     np.testing.assert_allclose(previous_components["RAIN_GSP"], [0.2, 1.8])
+    assert data_quality["clamped_negative_total_precip_deltas"] == 1
+    assert data_quality["clamped_negative_icon_microphysics_deltas"] == 1
 
 
 def test_process_chunk_writes_ptype_netcdf_when_output_format_is_netcdf(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

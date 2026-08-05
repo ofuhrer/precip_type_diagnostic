@@ -73,7 +73,9 @@ For REA confirm `time=0000`, cycle `D` steps `1..24`, and final valid time
 ordered messages per selected cycle, and no daily staging files remain in the
 archive root. For ICON mode confirm all three archived grid-scale microphysics
 accumulations passed completeness checks and the summary reports unavailable
-online convective/hail components.
+online convective/hail components. For all three models inspect the recorded
+negative-delta clamp counts and confirm that no within-cycle decrease is
+converted to the full current accumulator.
 
 ## Backfill campaign readiness
 

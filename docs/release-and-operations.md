@@ -172,6 +172,16 @@ Each core run writes:
 - `monitoring.json`: alerts, status, and recommended exit code;
 - `RUNNING.json`, atomically replaced by `DONE.json` or `FAILED.json`.
 
+Within-cycle accumulators must be monotonic, but independent GRIB packing can
+produce small negative decoded differences. The diagnostic clamps those values
+to zero uniformly for realtime and REA, including ICON's archived rain, snow,
+and graupel components. It records the affected value counts as
+`clamped_negative_total_precip_deltas` and
+`clamped_negative_icon_microphysics_deltas` under `data_quality`. Review
+unexpectedly large values or changes between cycles as an upstream data
+incident; do not reinterpret a negative delta as a reset and substitute the
+full current accumulation.
+
 Monitoring is critical for failed or incomplete members, fatal data quality,
 missing expected files, strict probability failure, exhausted FDB retries, or a
 configured wall-time violation. Start incident review with `CYCLE.json` for
