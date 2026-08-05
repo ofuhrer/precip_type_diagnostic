@@ -118,16 +118,17 @@ The manifest is immutable; use a new campaign and output root to change dates,
 algorithm, archive bounds, or missing-date policy. Schema-v1 daily manifests
 remain tied to `v0.3.0` and must be re-planned for the monthly layout.
 
-A verified 24-file Firdewsa day used about 55.1 MB and 157 seconds. The
-`20050101..20250831` calendar range projects to about 416 GB (`0.38 TiB`) of
-categorical GRIB2 in 248 monthly archive files. Including receipts, locks,
-Slurm logs, the archive contract, manifest, script, and campaign status, the
-planner projects 249 files in the archive root, 747 in the campaign root, and
-996 persistent files in total. Require at least `0.5 TiB` plus the agreed
-retention margin before submitting the full array. With eight concurrent
-monthly tasks, 157--158 seconds per day gives about 41 hours of ideal wall time;
-reserve about two days plus queue and retry margin. Recalculate from a
-representative day when packing, grid, algorithm, or archive bounds change.
+A complete 31-day Firdewsa month produced 1,708,342,296 bytes and finished in
+1 hour 10 minutes 57 seconds. Its daily science wall times averaged 135.8
+seconds. The `20050101..20250831` calendar range therefore projects to about
+416 GB (`0.38 TiB`) of categorical GRIB2 in 248 monthly archive files and about
+36 hours of ideal wall time with eight concurrent monthly tasks. Including
+receipts, locks, Slurm logs, the archive contract, manifest, script, and
+campaign status, the planner projects 249 files in the archive root, 747 in the
+campaign root, and 996 persistent files in total. Require at least `0.5 TiB`
+plus the agreed retention margin and reserve about two days plus queue and retry
+margin. Recalculate from a representative month when packing, grid, algorithm,
+or archive bounds change.
 
 Check progress cheaply, then verify all outputs before acceptance:
 

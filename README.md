@@ -97,11 +97,11 @@ The measured categorical output projects to about `416 GB` (`0.38 TiB`) for
 instead of 181,152 single-message files. Only 249 files land in the archive
 root (248 months plus `ARCHIVE_CONTRACT.json`); 747 receipts, locks, logs, and
 control files remain under the campaign root, for about 996 persistent files in
-total. At the measured 157--158 seconds per daily cycle, the default eight-way
-monthly array projects to roughly 41 hours of ideal wall time; budget about two
-days plus queue and retry margin. Reserve at least `0.5 TiB` plus the local
-retention margin and confirm the current long-term mount before launching the
-full campaign.
+total. A complete 31-day January task took 1 hour 11 minutes, averaging 136
+seconds per daily cycle. The default eight-way monthly array therefore projects
+to roughly 36 hours of ideal wall time; budget about two days plus queue and
+retry margin. Reserve at least `0.5 TiB` plus the local retention margin and
+confirm the current long-term mount before launching the full campaign.
 
 Check campaign state with:
 
