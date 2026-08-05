@@ -44,6 +44,8 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
 - `definitions/`: packaged ecCodes `PTYPE` overlay.
 - `tools/setup_balfrin.sh`: reviewed one-command Balfrin runtime setup.
 - `tools/run_balfrin.sh`: unified accepted operator entry point.
+- `tools/submit_backfill_campaign.sh`: resumable planner submission followed by
+  automatic monthly-array submission only after a strict plan succeeds.
 - `tools/run_depl_cycle.sh`: progressive explicit-cycle compatibility wrapper;
   it does not submit jobs.
 
@@ -79,6 +81,11 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
   concatenates its 24 verified GRIB2 messages in cycle-date/step order, and
   atomically publishes one file per month. One task owns a month; never allow
   concurrent append. Schema-v1 daily manifests remain tied to `v0.3.0`.
+- Full-range REA planning uses bounded parallel `fdb-list --depth=2` index
+  probes, split by year and checkpointed atomically. Sentinel presence at step
+  24 (step 0 for `HHL`) is only the date-availability prefilter; each daily task
+  remains authoritative for every required step and level. Never replace this
+  with an unbounded depth-3/full-message inventory scan.
 - Preserve immutable `CONTRACT.json`, progressive `CYCLE.json`, locks, verified
   resume, per-increment evidence, `ARCHIVE_CONTRACT.json`, and monthly campaign
   receipt/status contracts.

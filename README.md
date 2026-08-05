@@ -69,35 +69,46 @@ publication; omit it in normal production.
 
 ## B. REA-L-CH1 backfill
 
-Plan an inclusive range of daily cycle dates. The planner checks FDB inventory,
-groups the available dates into monthly tasks, writes an immutable manifest,
-and generates a Slurm array script:
+Plan an inclusive range of daily cycle dates. The planner checks FDB index
+availability in resumable yearly segments, groups the available dates into
+monthly tasks, writes an immutable manifest, and generates a Slurm array
+script:
 
 ```bash
 CAMPAIGN=/users/$USER/work/ptype-rea-2005-2025
 STAGING_ROOT=$SCRATCH/ptype-rea-2005-2025
 ARCHIVE_ROOT=/store_new/mch/msopr/$USER/ptype-rea-2005-2025
-tools/run_balfrin.sh backfill-plan \
+tools/submit_backfill_campaign.sh \
   --start-date 20050101 --end-date 20250831 \
   --algorithm icon \
   --output-root "$ARCHIVE_ROOT" \
   --staging-root "$STAGING_ROOT" \
   --manifest "$CAMPAIGN/manifest.json"
-sbatch "$CAMPAIGN/manifest.sbatch"
 ```
 
 Use a smaller date range for a subset. Missing FDB cycle dates fail planning by
 default; `--allow-missing-dates` records and excludes them explicitly. The
-generated script uses `pp-long`, one month per array task, and a default
-concurrency of 8. Every task still processes its dates one daily `0000` cycle at
-a time under `STAGING_ROOT`; only the validated monthly archive is published to
-`ARCHIVE_ROOT`. Staging and output roots are required not to overlap.
+planner uses eight bounded depth-2 FDB index probes by default, checks step 24
+for every required field (step 0 for `HHL`), and atomically checkpoints each
+completed year next to the manifest. A retry resumes completed years; the
+checkpoint is removed only after the manifest and array script are complete.
+These probes establish date availability without enumerating every GRIB
+record. Exact step/level completeness remains an authoritative daily-task gate.
+The full restart test completed in 13 minutes 52 seconds after reusing four
+checkpointed years; budget roughly 15–20 minutes for a clean plan under normal
+FDB load.
+The wrapper submits the resumable planner to `pp-short`; a successful strict
+plan then submits the generated `pp-long` script automatically, one month per
+array task with a default concurrency of 8. Every task processes its dates one
+daily `0000` cycle at a time under `STAGING_ROOT`; only the validated monthly
+archive is published to `ARCHIVE_ROOT`. Staging and output roots are required
+not to overlap.
 
 The measured categorical output projects to about `416 GB` (`0.38 TiB`) for
 `20050101..20250831`. The 7,548 daily cycles become 248 monthly GRIB2 archives
 instead of 181,152 single-message files. Only 249 files land in the archive
-root (248 months plus `ARCHIVE_CONTRACT.json`); 747 receipts, locks, logs, and
-control files remain under the campaign root, for about 996 persistent files in
+root (248 months plus `ARCHIVE_CONTRACT.json`); 748 receipts, locks, logs, and
+control files remain under the campaign root, for about 997 persistent files in
 total. A corrected ICON-mode 31-day January task took 1 hour 20 minutes,
 averaging 152 seconds per daily cycle. The default eight-way monthly array
 therefore projects to roughly 40 hours of ideal wall time; budget two to three
@@ -269,6 +280,7 @@ run as scheduled jobs on Balfrin.
 - [Science and architecture](docs/science-and-architecture.md)
 - [Release and operations](docs/release-and-operations.md)
 - [Release checklist](docs/release-checklist.md)
+- [v0.4.1 planner acceptance evidence](docs/acceptance/2026-08-05-v0.4.1-planner.md)
 - [v0.4.0 monthly archive acceptance evidence](docs/acceptance/2026-08-05-v0.4.0-monthly-archive.md)
 - [v0.3.0 release acceptance evidence](docs/acceptance/2026-08-04-v0.3.0-candidate.md)
 - [Provenance and licensing](docs/provenance.md)

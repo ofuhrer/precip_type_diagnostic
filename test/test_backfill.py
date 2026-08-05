@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from precip_type_diag import backfill
-from precip_type_diag.constants import INPUT_PARAM_IDS, OUTPUT_PARAM_ID, OUTPUT_SHORT_NAME
+from precip_type_diag.constants import OUTPUT_PARAM_ID, OUTPUT_SHORT_NAME
 from precip_type_diag.probabilities import member_grib_path
 
 
@@ -69,20 +70,156 @@ def _write_complete_receipt(manifest_path: Path, manifest: dict[str, object], pe
 
 
 def test_reanalysis_inventory_intersects_every_required_field(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
+    calls: list[tuple[str, str, int, str, str]] = []
 
-    def fake_list(filter_expr, **kwargs):
-        calls.append(filter_expr)
-        dates = ["20100101", "20100102"]
-        if f"param={INPUT_PARAM_IDS['T_G']}" in filter_expr:
-            dates = ["20100101"]
-        return {"date": dates}
+    def fake_list(*, name, levtype, step, start_date, end_date, retry_config):
+        del retry_config
+        calls.append((name, levtype, step, start_date, end_date))
+        dates = {"20100101", "20100102"}
+        if name == "T_G":
+            dates = {"20100101"}
+        return dates, backfill.RetryStats(attempts=1)
 
-    monkeypatch.setattr(backfill, "_fdb_utils_list", fake_list)
+    monkeypatch.setattr(backfill, "_list_index_dates_for_field", fake_list)
 
     assert backfill.list_available_reanalysis_dates(start_date="20100101", end_date="20100102") == {"20100101"}
     assert len(calls) == 6
-    assert all("date=20100101/to/20100102" in call for call in calls)
+    assert {call[:3] for call in calls} == {
+        ("T", "ml", 24),
+        ("P", "ml", 24),
+        ("QV", "ml", 24),
+        ("HHL", "ml", 0),
+        ("TOT_PREC", "sfc", 24),
+        ("T_G", "sfc", 24),
+    }
+    assert all(call[3:] == ("20100101", "20100102") for call in calls)
+
+
+def test_compact_inventory_parser_accepts_single_lists_and_ranges() -> None:
+    output = "\n".join(
+        (
+            "date=20100101,time=0000,levtype=ml,",
+            "date=20100102/20100103,time=0000,levtype=ml,",
+            "date=20100104/to/20100105,time=0000,levtype=ml,",
+        )
+    )
+
+    assert backfill._dates_from_compact_fdb_output(output) == {
+        "20100101",
+        "20100102",
+        "20100103",
+        "20100104",
+        "20100105",
+    }
+
+
+def test_compact_inventory_parser_rejects_unknown_output() -> None:
+    with pytest.raises(RuntimeError, match="Unexpected compact FDB inventory line"):
+        backfill._dates_from_compact_fdb_output("FDB output format changed")
+
+
+def test_field_inventory_uses_compact_depth_two_index_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        assert kwargs == {"check": True, "capture_output": True, "text": True}
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="date=20100101,time=0000,levtype=ml,\ndate=20100102,time=0000,levtype=ml,\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(backfill.subprocess, "run", fake_run)
+    dates, retry_stats = backfill._list_index_dates_for_field(
+        name="T",
+        levtype="ml",
+        step=24,
+        start_date="20100101",
+        end_date="20100102",
+        retry_config=backfill.RetryConfig(),
+    )
+
+    assert dates == {"20100101", "20100102"}
+    assert retry_stats.as_dict() == {"attempts": 1, "retries": 0, "exhausted": 0}
+    assert commands == [
+        [
+            "fdb-list",
+            "--compact",
+            "--porcelain",
+            "--depth=2",
+            "class=rd,stream=reanl,expver=r001,model=icon-rea-l-ch1,type=cf,"
+            "date=20100101/to/20100102,time=0000,param=500014,levtype=ml,step=24",
+        ]
+    ]
+
+
+def test_inventory_checkpoint_resumes_completed_years(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def fake_list(*, name, levtype, step, start_date, end_date, retry_config):
+        del levtype, step, retry_config
+        calls.append(f"{start_date}:{name}")
+        return set(backfill._date_range(start_date, end_date)), backfill.RetryStats(attempts=1)
+
+    checkpoint_path = tmp_path / "manifest.inventory.json"
+    monkeypatch.setattr(backfill, "_list_index_dates_for_field", fake_list)
+    dates = backfill.list_available_reanalysis_dates(
+        algorithm="icon",
+        start_date="20101231",
+        end_date="20110101",
+        checkpoint_path=checkpoint_path,
+    )
+    assert dates == {"20101231", "20110101"}
+    assert len(calls) == 18
+
+    calls.clear()
+    resumed = backfill.list_available_reanalysis_dates(
+        algorithm="icon",
+        start_date="20101231",
+        end_date="20110101",
+        checkpoint_path=checkpoint_path,
+    )
+    assert resumed == dates
+    assert calls == []
+
+
+def test_inventory_checkpoint_rejects_invalid_cached_dates(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "manifest.inventory.json"
+    contract = {
+        "query_mode": backfill.INVENTORY_QUERY_MODE,
+        "algorithm": "icon",
+        "start_date": "20100101",
+        "end_date": "20100101",
+        "fields": [
+            {"name": name, "levtype": levtype, "sentinel_step": step}
+            for name, levtype, step in backfill._inventory_fields("icon")
+        ],
+    }
+    backfill._atomic_write_json(
+        {
+            "schema_version": backfill.INVENTORY_CHECKPOINT_SCHEMA_VERSION,
+            "contract": contract,
+            "years": {
+                "2010": {
+                    "start_date": "20100101",
+                    "end_date": "20100101",
+                    "dates": ["20100102"],
+                    "retry_stats": {},
+                }
+            },
+        },
+        checkpoint_path,
+    )
+
+    with pytest.raises(RuntimeError, match="Invalid inventory checkpoint entry for year 2010"):
+        backfill.list_available_reanalysis_dates(
+            algorithm="icon",
+            start_date="20100101",
+            end_date="20100101",
+            checkpoint_path=checkpoint_path,
+        )
 
 
 def test_build_manifest_groups_cycles_into_monthly_archives(tmp_path: Path) -> None:
@@ -109,7 +246,7 @@ def test_build_manifest_groups_cycles_into_monthly_archives(tmp_path: Path) -> N
             "archive": "ICON-REA-L-CH1/2010/ptype_ICON-REA-L-CH1_201002.grib2",
         },
     ]
-    assert manifest["file_count_projection"]["estimated_persistent_files"] == 12
+    assert manifest["file_count_projection"]["estimated_persistent_files"] == 13
     assert json.loads(manifest_path.read_text())["messages_per_cycle"] == 24
 
 
@@ -133,9 +270,10 @@ def test_full_archive_manifest_projects_248_monthly_files(tmp_path: Path) -> Non
         "monthly_receipts": 248,
         "monthly_locks": 248,
         "slurm_logs": 248,
+        "planner_logs": 1,
         "campaign_control_files": 3,
-        "estimated_campaign_root_files": 747,
-        "estimated_persistent_files": 996,
+        "estimated_campaign_root_files": 748,
+        "estimated_persistent_files": 997,
         "single_message_grib_files_avoided": 181152,
     }
 
