@@ -80,6 +80,8 @@ converted to the full current accumulator.
 ## Backfill campaign readiness
 
 - Inventory manifest date range and missing-date policy reviewed:
+- Depth-2 sentinel inventory, yearly checkpoint/resume, and full-range planner runtime reviewed:
+- Daily task retained as the authoritative exact step/level completeness gate:
 - Monthly grouping, staging root, archive root, and schema version reviewed:
 - Generated Slurm partition, wall time, monthly array size, and concurrency reviewed:
 - One monthly receipt, checksum, failed attempt, and restart reviewed:

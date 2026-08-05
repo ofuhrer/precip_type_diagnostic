@@ -152,6 +152,10 @@ FDB discovery/checks -> HHL selection -> chunk retrieval -> array validation
 - `backfill.py` owns immutable REA inventory manifests, monthly Slurm array
   tasks, bounded daily staging, chronological GRIB concatenation, atomic
   monthly publication, receipts, restart verification, and campaign status.
+  Planning uses resumable year segments and depth-2 FDB index probes for
+  required-field sentinel presence. It deliberately does not enumerate every
+  GRIB record; the daily core remains authoritative for exact step/level
+  completeness.
 - `gribio.py` writes GRIB2 from the current `TOT_PREC` template, preserving grid
   and run metadata while replacing parameter metadata and values. It also
   iterates metadata from multi-message archives for publication verification.

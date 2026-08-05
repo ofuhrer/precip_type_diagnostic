@@ -5,11 +5,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
+import re
 import shlex
 import shutil
+import subprocess
 import tempfile
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO, Protocol
@@ -30,9 +34,9 @@ from .operational import (
     RetryStats,
     _all_member_outputs_valid,
     _atomic_write_json,
-    _fdb_utils_list,
     _filter_parts,
     _make_run,
+    _retry_operation,
     retry_config_from_options,
     run_operational,
     validate_run_date_time,
@@ -44,6 +48,9 @@ MANIFEST_SCHEMA_VERSION = 2
 MANIFEST_MODE = "rea_l_ch1_monthly_backfill"
 ARCHIVE_PERIOD = "month"
 MESSAGES_PER_CYCLE = 24
+INVENTORY_CHECKPOINT_SCHEMA_VERSION = 1
+INVENTORY_QUERY_MODE = "yearly_fdb_index_depth_2"
+LOGGER = logging.getLogger(__name__)
 ARCHIVE_METADATA_KEYS = (
     "shortName",
     "paramId",
@@ -101,47 +108,254 @@ def _resolved_staging_root(*, staging_root: Path | None, manifest_path: Path, ou
     return resolved_staging
 
 
+def _inventory_fields(algorithm: str) -> tuple[tuple[str, str, int], ...]:
+    fields: list[tuple[str, str, int]] = [
+        ("T", "ml", 24),
+        ("P", "ml", 24),
+        ("QV", "ml", 24),
+        ("HHL", "ml", 0),
+        ("TOT_PREC", "sfc", 24),
+        ("T_G", "sfc", 24),
+    ]
+    if algorithm == "icon":
+        fields.extend((name, "sfc", 24) for name in ("RAIN_GSP", "SNOW_GSP", "GRAU_GSP"))
+    return tuple(fields)
+
+
+def _year_periods(start_date: str, end_date: str) -> list[tuple[str, str, str]]:
+    start = _parse_date(start_date)
+    end = _parse_date(end_date)
+    periods: list[tuple[str, str, str]] = []
+    for year in range(start.year, end.year + 1):
+        period_start = max(start, datetime(year, 1, 1, tzinfo=timezone.utc))
+        period_end = min(end, datetime(year, 12, 31, tzinfo=timezone.utc))
+        periods.append((str(year), period_start.strftime("%Y%m%d"), period_end.strftime("%Y%m%d")))
+    return periods
+
+
+def _dates_from_compact_fdb_output(output: str) -> set[str]:
+    dates: set[str] = set()
+    for line in output.splitlines():
+        match = re.search(r"(?:^|,)date=([^,]+)", line)
+        if match is None:
+            if line.strip():
+                raise RuntimeError(f"Unexpected compact FDB inventory line {line!r}")
+            continue
+        values = match.group(1).split("/")
+        if len(values) == 3 and values[1] == "to":
+            dates.update(_date_range(values[0], values[2]))
+            continue
+        for value in values:
+            if not re.fullmatch(r"\d{8}", value):
+                raise RuntimeError(f"Unexpected compact FDB date value {value!r}")
+            validate_run_date_time(value, "0000")
+            dates.add(value)
+    return dates
+
+
+def _list_index_dates_for_field(
+    *,
+    name: str,
+    levtype: str,
+    step: int,
+    start_date: str,
+    end_date: str,
+    retry_config: RetryConfig,
+) -> tuple[set[str], RetryStats]:
+    retry_stats = RetryStats()
+    date_filter = start_date if start_date == end_date else f"{start_date}/to/{end_date}"
+    filter_expr = _filter_parts(
+        model=REA_MODEL,
+        member="000",
+        date=date_filter,
+        time_value="0000",
+        param=INPUT_PARAM_IDS[name],
+        levtype=levtype,
+        step=str(step),
+    )
+    result = _retry_operation(
+        f"fdb-list compact index for {name} {start_date}..{end_date}",
+        lambda: subprocess.run(
+            ["fdb-list", "--compact", "--porcelain", "--depth=2", filter_expr],
+            check=True,
+            capture_output=True,
+            text=True,
+        ),
+        retry_config=retry_config,
+        retry_stats=retry_stats,
+    )
+    dates = _dates_from_compact_fdb_output(result.stdout)
+    expected = set(_date_range(start_date, end_date))
+    unexpected = sorted(dates - expected)
+    if unexpected:
+        raise RuntimeError(f"Compact FDB inventory returned dates outside {start_date}..{end_date}: {unexpected[:10]}")
+    return dates, retry_stats
+
+
+def _load_inventory_checkpoint(path: Path, contract: dict[str, object]) -> dict[str, object]:
+    if not path.exists():
+        return {
+            "schema_version": INVENTORY_CHECKPOINT_SCHEMA_VERSION,
+            "contract": contract,
+            "years": {},
+        }
+    checkpoint = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        checkpoint.get("schema_version") != INVENTORY_CHECKPOINT_SCHEMA_VERSION
+        or checkpoint.get("contract") != contract
+        or not isinstance(checkpoint.get("years"), dict)
+    ):
+        raise RuntimeError(
+            f"Inventory checkpoint contract mismatch at {path}; use a new campaign path or remove the stale checkpoint"
+        )
+    return checkpoint
+
+
+def _list_available_reanalysis_inventory(
+    *,
+    algorithm: str,
+    start_date: str,
+    end_date: str,
+    retry_config: RetryConfig,
+    retry_stats: RetryStats,
+    inventory_workers: int,
+    checkpoint_path: Path | None,
+) -> tuple[set[str], dict[str, object]]:
+    if inventory_workers <= 0:
+        raise ValueError(f"inventory_workers must be positive, got {inventory_workers}")
+    fields = _inventory_fields(algorithm)
+    periods = _year_periods(start_date, end_date)
+    contract: dict[str, object] = {
+        "query_mode": INVENTORY_QUERY_MODE,
+        "algorithm": algorithm,
+        "start_date": start_date,
+        "end_date": end_date,
+        "fields": [
+            {"name": name, "levtype": levtype, "sentinel_step": step}
+            for name, levtype, step in fields
+        ],
+    }
+    checkpoint = (
+        _load_inventory_checkpoint(checkpoint_path, contract)
+        if checkpoint_path is not None
+        else {"schema_version": INVENTORY_CHECKPOINT_SCHEMA_VERSION, "contract": contract, "years": {}}
+    )
+    checkpoint_years = checkpoint["years"]
+    if not isinstance(checkpoint_years, dict):
+        raise RuntimeError("Invalid inventory checkpoint years")
+    available_dates: set[str] = set()
+    resumed_years = 0
+    completed_years = 0
+    for year, period_start, period_end in periods:
+        cached = checkpoint_years.get(year)
+        if isinstance(cached, dict) and isinstance(cached.get("dates"), list):
+            period_dates = {str(value) for value in cached["dates"]}
+            expected_period_dates = set(_date_range(period_start, period_end))
+            if (
+                cached.get("start_date") != period_start
+                or cached.get("end_date") != period_end
+                or any(not re.fullmatch(r"\d{8}", value) for value in period_dates)
+                or not period_dates <= expected_period_dates
+            ):
+                raise RuntimeError(f"Invalid inventory checkpoint entry for year {year} at {checkpoint_path}")
+            retry_mapping = cached.get("retry_stats")
+            if isinstance(retry_mapping, dict):
+                retry_stats.add_mapping(retry_mapping)
+            available_dates.update(period_dates)
+            resumed_years += 1
+            LOGGER.info("resumed REA inventory year=%s dates=%s", year, len(period_dates))
+            continue
+
+        LOGGER.info(
+            "querying REA inventory year=%s range=%s..%s fields=%s workers=%s",
+            year,
+            period_start,
+            period_end,
+            len(fields),
+            min(inventory_workers, len(fields)),
+        )
+        field_dates: list[set[str]] = []
+        period_retry_stats = RetryStats()
+        with ThreadPoolExecutor(max_workers=min(inventory_workers, len(fields))) as executor:
+            futures = {
+                executor.submit(
+                    _list_index_dates_for_field,
+                    name=name,
+                    levtype=levtype,
+                    step=step,
+                    start_date=period_start,
+                    end_date=period_end,
+                    retry_config=retry_config,
+                ): name
+                for name, levtype, step in fields
+            }
+            for future in as_completed(futures):
+                dates, field_retry_stats = future.result()
+                field_dates.append(dates)
+                period_retry_stats.add(field_retry_stats)
+        period_dates = set.intersection(*field_dates)
+        retry_stats.add(period_retry_stats)
+        checkpoint_years[year] = {
+            "start_date": period_start,
+            "end_date": period_end,
+            "dates": sorted(period_dates),
+            "retry_stats": period_retry_stats.as_dict(),
+        }
+        if checkpoint_path is not None:
+            _atomic_write_json(checkpoint, checkpoint_path)
+        available_dates.update(period_dates)
+        completed_years += 1
+        LOGGER.info(
+            "checkpointed REA inventory year=%s dates=%s retries=%s",
+            year,
+            len(period_dates),
+            period_retry_stats.retries,
+        )
+    return available_dates, {
+        "query_mode": INVENTORY_QUERY_MODE,
+        "inventory_workers": inventory_workers,
+        "year_periods": len(periods),
+        "field_queries": len(periods) * len(fields),
+        "executed_field_queries": completed_years * len(fields),
+        "resumed_field_queries": resumed_years * len(fields),
+        "resumed_years": resumed_years,
+        "completed_years": completed_years,
+        "checkpoint_path": str(checkpoint_path.resolve()) if checkpoint_path is not None else None,
+        "sentinel_contract": contract["fields"],
+        "completeness_note": (
+            "The index planner proves required-field presence at each field's sentinel step; "
+            "daily task retrieval remains authoritative for every required step and level."
+        ),
+    }
+
+
 def list_available_reanalysis_dates(
     *,
     algorithm: str = ALGORITHM_FIRDEWSA,
-    start_date: str | None = None,
-    end_date: str | None = None,
+    start_date: str,
+    end_date: str,
     retry_config: RetryConfig | None = None,
     retry_stats: RetryStats | None = None,
+    inventory_workers: int = 8,
+    checkpoint_path: Path | None = None,
 ) -> set[str]:
-    """Return daily cycles present for every field required by the algorithm."""
+    """Return daily cycles with index-level sentinel presence for every required field."""
 
     if algorithm not in DIAGNOSTIC_ALGORITHMS:
         raise ValueError(f"Unsupported algorithm {algorithm!r}")
-    if (start_date is None) != (end_date is None):
-        raise ValueError("start_date and end_date must be provided together")
-    date_filter: str | None = None
-    if start_date is not None and end_date is not None:
-        _date_range(start_date, end_date)
-        date_filter = start_date if start_date == end_date else f"{start_date}/to/{end_date}"
+    _date_range(start_date, end_date)
     config = RetryConfig() if retry_config is None else retry_config
     stats = RetryStats() if retry_stats is None else retry_stats
-    fields = [(name, "ml") for name in ("T", "P", "QV", "HHL")]
-    fields.extend((name, "sfc") for name in ("TOT_PREC", "T_G"))
-    if algorithm == "icon":
-        fields.extend((name, "sfc") for name in ("RAIN_GSP", "SNOW_GSP", "GRAU_GSP"))
-    dates_by_field: list[set[str]] = []
-    for name, levtype in fields:
-        values = _fdb_utils_list(
-            _filter_parts(
-                model=REA_MODEL,
-                member="000",
-                date=date_filter,
-                time_value="0000",
-                param=INPUT_PARAM_IDS[name],
-                levtype=levtype,
-            ),
-            show_keys=("date",),
-            retry_config=config,
-            retry_stats=stats,
-        )
-        dates_by_field.append({str(value) for value in values.get("date", [])})
-    return set.intersection(*dates_by_field)
+    dates, _ = _list_available_reanalysis_inventory(
+        algorithm=algorithm,
+        start_date=start_date,
+        end_date=end_date,
+        retry_config=config,
+        retry_stats=stats,
+        inventory_workers=inventory_workers,
+        checkpoint_path=checkpoint_path,
+    )
+    return dates
 
 
 def build_backfill_manifest(
@@ -154,6 +368,7 @@ def build_backfill_manifest(
     algorithm: str = ALGORITHM_FIRDEWSA,
     available_dates: set[str] | None = None,
     allow_missing_dates: bool = False,
+    inventory_workers: int = 8,
     fdb_retries: int = 3,
     fdb_retry_initial_s: float = 10.0,
     fdb_retry_max_s: float = 120.0,
@@ -167,17 +382,32 @@ def build_backfill_manifest(
         max_delay_s=fdb_retry_max_s,
     )
     retry_stats = RetryStats()
-    inventory = (
-        list_available_reanalysis_dates(
+    inventory_checkpoint_path = manifest_path.with_suffix(".inventory.json")
+    if available_dates is None:
+        inventory, inventory_plan = _list_available_reanalysis_inventory(
             algorithm=algorithm,
             start_date=start_date,
             end_date=end_date,
             retry_config=retry_config,
             retry_stats=retry_stats,
+            inventory_workers=inventory_workers,
+            checkpoint_path=inventory_checkpoint_path,
         )
-        if available_dates is None
-        else available_dates
-    )
+    else:
+        inventory = available_dates
+        inventory_plan = {
+            "query_mode": "supplied_dates",
+            "inventory_workers": 0,
+            "year_periods": len(_year_periods(start_date, end_date)),
+            "field_queries": 0,
+            "executed_field_queries": 0,
+            "resumed_field_queries": 0,
+            "resumed_years": 0,
+            "completed_years": 0,
+            "checkpoint_path": None,
+            "sentinel_contract": [],
+            "completeness_note": "Dates were supplied by the caller; no live FDB inventory query was performed.",
+        }
     missing_dates = [date for date in requested_dates if date not in inventory]
     if missing_dates and not allow_missing_dates:
         preview = ", ".join(missing_dates[:10])
@@ -235,6 +465,7 @@ def build_backfill_manifest(
             "missing_cycles": missing_dates,
             "allow_missing_dates": allow_missing_dates,
             "retry_stats": retry_stats.as_dict(),
+            "plan": inventory_plan,
         },
         "periods": periods,
         "file_count_projection": {
@@ -244,9 +475,10 @@ def build_backfill_manifest(
             "monthly_receipts": len(periods),
             "monthly_locks": len(periods),
             "slurm_logs": len(periods),
+            "planner_logs": 1,
             "campaign_control_files": 3,
-            "estimated_campaign_root_files": 3 * len(periods) + 3,
-            "estimated_persistent_files": 4 * len(periods) + 4,
+            "estimated_campaign_root_files": 3 * len(periods) + 4,
+            "estimated_persistent_files": 4 * len(periods) + 5,
             "single_message_grib_files_avoided": len(selected_dates) * MESSAGES_PER_CYCLE,
         },
     }
@@ -762,6 +994,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--algorithm", choices=DIAGNOSTIC_ALGORITHMS, default=ALGORITHM_FIRDEWSA)
     plan.add_argument("--allow-missing-dates", action="store_true")
     plan.add_argument("--slurm-script", type=Path)
+    plan.add_argument("--inventory-workers", type=int, default=8)
     plan.add_argument("--concurrency", type=int, default=8)
     plan.add_argument("--partition", default="pp-long")
     plan.add_argument("--wall-time", default="06:00:00")
@@ -783,6 +1016,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     args = build_parser().parse_args()
     if args.command == "plan":
         manifest = build_backfill_manifest(
@@ -793,6 +1027,7 @@ def main() -> int:
             staging_root=args.staging_root,
             algorithm=args.algorithm,
             allow_missing_dates=args.allow_missing_dates,
+            inventory_workers=args.inventory_workers,
         )
         script_path = args.slurm_script or args.manifest.with_suffix(".sbatch")
         write_slurm_array_script(
@@ -802,6 +1037,7 @@ def main() -> int:
             partition=args.partition,
             wall_time=args.wall_time,
         )
+        args.manifest.with_suffix(".inventory.json").unlink(missing_ok=True)
         payload = {"manifest": manifest, "slurm_script": str(script_path)}
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0

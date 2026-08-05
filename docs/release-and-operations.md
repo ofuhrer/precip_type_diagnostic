@@ -100,18 +100,31 @@ Planning is inventory-backed and uses inclusive cycle dates:
 CAMPAIGN=/users/$USER/work/ptype-rea-campaign
 STAGING_ROOT=$SCRATCH/ptype-rea-campaign
 ARCHIVE_ROOT=/store_new/mch/msopr/$USER/ptype-rea-campaign
-tools/run_balfrin.sh backfill-plan \
+tools/submit_backfill_campaign.sh \
   --start-date 20050101 --end-date 20250831 \
   --algorithm icon \
   --output-root "$ARCHIVE_ROOT" \
   --staging-root "$STAGING_ROOT" \
   --manifest "$CAMPAIGN/manifest.json"
-sbatch "$CAMPAIGN/manifest.sbatch"
 ```
 
-The schema-v2 manifest groups exact inventory dates by calendar month. The
-generated `pp-long` array assigns one month to each task. A task processes every
-selected day independently at `0000` and steps `1..24` in bounded scratch,
+The schema-v2 planner uses bounded parallel depth-2 FDB index probes rather
+than scanning all matching GRIB messages. It splits the range into years,
+checks every required field at step 24 (`HHL` at step 0), and atomically writes
+`manifest.inventory.json` after each completed year. Re-running the same
+campaign resumes those years. The checkpoint is removed after successful
+manifest and script publication. This is a date-availability prefilter; every
+daily task still validates all required steps and levels before publication.
+The accepted full-range restart completed in 13m52s after reusing four years;
+budget 15–20 minutes for a clean plan under normal FDB load. The 59-minute
+planner allocation leaves margin, and an interrupted attempt keeps its last
+complete yearly checkpoint.
+The submission wrapper runs this planner on `pp-short` and submits the generated
+monthly `pp-long` array only if strict planning completes successfully.
+
+The manifest groups exact inventory dates by calendar month. The generated
+`pp-long` array assigns one month to each task. A task processes every selected
+day independently at `0000` and steps `1..24` in bounded scratch,
 concatenates the validated GRIB messages in cycle-date/step order, verifies the
 complete stream, and atomically publishes one monthly file. Each task writes a
 monthly receipt under `receipts/` and returns non-zero on critical monitoring.
@@ -125,8 +138,8 @@ seconds. The `20050101..20250831` calendar range therefore projects to about
 416 GB (`0.38 TiB`) of categorical GRIB2 in 248 monthly archive files and about
 40 hours of ideal wall time with eight concurrent monthly tasks. Including
 receipts, locks, Slurm logs, the archive contract, manifest, script, and
-campaign status, the planner projects 249 files in the archive root, 747 in the
-campaign root, and 996 persistent files in total. Require at least `0.5 TiB`
+campaign status, the planner projects 249 files in the archive root, 748 in the
+campaign root, and 997 persistent files in total. Require at least `0.5 TiB`
 plus the agreed retention margin and reserve two to three days plus queue and
 retry margin. Recalculate from a representative month when packing, grid,
 algorithm, or archive bounds change.
