@@ -11,8 +11,9 @@ Balfrin and offers two modes:
   `50da7c5924994f7626688eb5185b8e66c781b12e`.
 
 The accepted wrappers use NetCDF plus strict ensemble probabilities for
-realtime EPS and categorical GRIB2 for REA backfills. The lower-level CLI also
-supports either member format.
+realtime EPS and atomically published monthly, multi-message categorical GRIB2
+archives for REA backfills. The lower-level CLI also supports either member
+format.
 
 ## Before Editing
 
@@ -36,7 +37,8 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
 - `grid.py`: array validation and grid diagnosis.
 - `operational.py`: FDB contracts, retrieval, processing, output, and summaries.
 - `realtime.py`: progressive EPS discovery, cycle state, and incremental publish.
-- `backfill.py`: REA inventory manifests, daily tasks, receipts, and status.
+- `backfill.py`: REA inventory manifests, monthly tasks, bounded daily staging,
+  atomic archives, receipts, and status.
 - `gribio.py`, `netcdfio.py`, `probabilities.py`: product formats and aggregation.
 - `monitoring.py`: operational status and exit contract.
 - `definitions/`: packaged ecCodes `PTYPE` overlay.
@@ -66,10 +68,16 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
   and probabilities; accepted REA processing uses member `000`, steps `1..24`,
   and GRIB2. Probability aggregation is strict and uses percent (`0..100`).
 - Realtime publication advances only through contiguous complete hours and
-  preserves earlier products. REA manifests contain independent daily cycles;
-  cycle `D` step 24 is valid at `D+1 00 UTC` but remains part of cycle `D`.
+  preserves earlier products. REA manifests group independent daily cycles into
+  monthly tasks; cycle `D` step 24 is valid at `D+1 00 UTC` but remains part of
+  cycle `D`.
+- REA backfill schema v2 stages each daily cycle outside the archive root,
+  concatenates its 24 verified GRIB2 messages in cycle-date/step order, and
+  atomically publishes one file per month. One task owns a month; never allow
+  concurrent append. Schema-v1 daily manifests remain tied to `v0.3.0`.
 - Preserve immutable `CONTRACT.json`, progressive `CYCLE.json`, locks, verified
-  resume, per-increment evidence, and campaign receipt/status contracts.
+  resume, per-increment evidence, `ARCHIVE_CONTRACT.json`, and monthly campaign
+  receipt/status contracts.
 - Fail visibly on deterministic science, shape, validation, and completeness
   errors. Retry only transient FDB list, retrieve, and decode failures.
 - Runs publish `RUNNING.json`, then atomically `DONE.json` or `FAILED.json`;
@@ -96,7 +104,8 @@ git diff --check
 ```
 
 Also build and inspect a wheel after packaging changes. Run the release
-checklist's Balfrin acceptance matrix after production-facing changes;
+checklist's Balfrin acceptance matrix after production-facing changes,
+including a real multi-message monthly GRIB smoke and restart;
 dual-mode FDB/science releases cover all three models. Use `pp-short` for jobs
 that fit its limit and `pp-long` for generated REA arrays.
 

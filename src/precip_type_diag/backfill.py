@@ -3,16 +3,29 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
+import shutil
+import tempfile
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import BinaryIO, Protocol
 
-from .constants import ALGORITHM_FIRDEWSA, DIAGNOSTIC_ALGORITHMS, INPUT_PARAM_IDS
+from .constants import (
+    ALGORITHM_FIRDEWSA,
+    DIAGNOSTIC_ALGORITHMS,
+    INPUT_PARAM_IDS,
+    OUTPUT_PARAM_ID,
+    OUTPUT_SHORT_NAME,
+)
+from .gribio import read_grib_archive_metadata
 from .operational import (
     MODEL_MEMBERS,
     MODEL_SPECS,
+    CycleLock,
     RetryConfig,
     RetryStats,
     _all_member_outputs_valid,
@@ -24,9 +37,26 @@ from .operational import (
     run_operational,
     validate_run_date_time,
 )
+from .probabilities import member_grib_path
 
 REA_MODEL = "ICON-REA-L-CH1"
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
+MANIFEST_MODE = "rea_l_ch1_monthly_backfill"
+ARCHIVE_PERIOD = "month"
+MESSAGES_PER_CYCLE = 24
+ARCHIVE_METADATA_KEYS = (
+    "shortName",
+    "paramId",
+    "dataDate",
+    "dataTime",
+    "endStep",
+    "validityDate",
+    "validityTime",
+)
+
+
+class _Digest(Protocol):
+    def update(self, data: bytes) -> None: ...
 
 
 def _parse_date(value: str) -> datetime:
@@ -41,6 +71,34 @@ def _date_range(start_date: str, end_date: str) -> list[str]:
         raise ValueError(f"end_date must be on or after start_date, got {start_date}..{end_date}")
     count = (end - start).days + 1
     return [(start + timedelta(days=offset)).strftime("%Y%m%d") for offset in range(count)]
+
+
+def _monthly_periods(dates: list[str]) -> list[dict[str, object]]:
+    grouped: defaultdict[str, list[str]] = defaultdict(list)
+    for date in dates:
+        grouped[date[:6]].append(date)
+    return [
+        {
+            "index": index,
+            "period": period,
+            "dates": period_dates,
+            "message_count": len(period_dates) * MESSAGES_PER_CYCLE,
+            "archive": f"{REA_MODEL}/{period[:4]}/ptype_{REA_MODEL}_{period}.grib2",
+        }
+        for index, (period, period_dates) in enumerate(sorted(grouped.items()))
+    ]
+
+
+def _resolved_staging_root(*, staging_root: Path | None, manifest_path: Path, output_root: Path) -> Path:
+    resolved_output = output_root.resolve()
+    resolved_staging = (manifest_path.parent / "staging" if staging_root is None else staging_root).resolve()
+    if (
+        resolved_staging == resolved_output
+        or resolved_staging.is_relative_to(resolved_output)
+        or resolved_output.is_relative_to(resolved_staging)
+    ):
+        raise ValueError("staging_root and output_root must not overlap")
+    return resolved_staging
 
 
 def list_available_reanalysis_dates(
@@ -92,6 +150,7 @@ def build_backfill_manifest(
     end_date: str,
     output_root: Path,
     manifest_path: Path,
+    staging_root: Path | None = None,
     algorithm: str = ALGORITHM_FIRDEWSA,
     available_dates: set[str] | None = None,
     allow_missing_dates: bool = False,
@@ -131,9 +190,16 @@ def build_backfill_manifest(
         raise RuntimeError("No requested REA-L-CH1 cycles are available in FDB")
     start_valid = _parse_date(selected_dates[0]) + timedelta(hours=1)
     end_valid = _parse_date(selected_dates[-1]) + timedelta(days=1)
+    periods = _monthly_periods(selected_dates)
+    resolved_output_root = output_root.resolve()
+    resolved_staging_root = _resolved_staging_root(
+        staging_root=staging_root,
+        manifest_path=manifest_path,
+        output_root=output_root,
+    )
     manifest: dict[str, object] = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
-        "mode": "rea_l_ch1_daily_backfill",
+        "mode": MANIFEST_MODE,
         "model": REA_MODEL,
         "diagnostic_algorithm": algorithm,
         "output_format": "grib2",
@@ -141,13 +207,17 @@ def build_backfill_manifest(
         "start_step": 1,
         "max_step": MODEL_SPECS[REA_MODEL].max_step,
         "cycle_time": "0000",
+        "archive_period": ARCHIVE_PERIOD,
+        "archive_ordering": "cycle_date_then_end_step",
+        "messages_per_cycle": MESSAGES_PER_CYCLE,
         "cycle_date_range": {"start": start_date, "end": end_date, "inclusive": True},
         "valid_time_coverage": {
             "first_interval_end": start_valid.isoformat(),
             "last_interval_end": end_valid.isoformat(),
             "note": "Cycle D step 24 is valid at D+1 00 UTC; dates in this manifest are cycle dates.",
         },
-        "output_root": str(output_root.resolve()),
+        "output_root": str(resolved_output_root),
+        "staging_root": str(resolved_staging_root),
         "manifest_path": str(manifest_path.resolve()),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "inventory": {
@@ -166,7 +236,19 @@ def build_backfill_manifest(
             "allow_missing_dates": allow_missing_dates,
             "retry_stats": retry_stats.as_dict(),
         },
-        "cycles": [{"index": index, "date": date} for index, date in enumerate(selected_dates)],
+        "periods": periods,
+        "file_count_projection": {
+            "archive_files": len(periods),
+            "archive_contract_files": 1,
+            "estimated_archive_root_files": len(periods) + 1,
+            "monthly_receipts": len(periods),
+            "monthly_locks": len(periods),
+            "slurm_logs": len(periods),
+            "campaign_control_files": 3,
+            "estimated_campaign_root_files": 3 * len(periods) + 3,
+            "estimated_persistent_files": 4 * len(periods) + 4,
+            "single_message_grib_files_avoided": len(selected_dates) * MESSAGES_PER_CYCLE,
+        },
     }
     _atomic_write_json(manifest, manifest_path)
     return manifest
@@ -174,29 +256,43 @@ def build_backfill_manifest(
 
 def load_manifest(path: Path) -> dict[str, object]:
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION or manifest.get("mode") != "rea_l_ch1_daily_backfill":
+    if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION or manifest.get("mode") != MANIFEST_MODE:
         raise RuntimeError(f"Unsupported backfill manifest: {path}")
-    if manifest.get("model") != REA_MODEL or manifest.get("cycle_time") != "0000":
+    if (
+        manifest.get("model") != REA_MODEL
+        or manifest.get("cycle_time") != "0000"
+        or manifest.get("archive_period") != ARCHIVE_PERIOD
+        or manifest.get("messages_per_cycle") != MESSAGES_PER_CYCLE
+    ):
         raise RuntimeError(f"Invalid REA-L-CH1 cycle contract in {path}")
-    cycles = manifest.get("cycles")
-    if not isinstance(cycles, list) or not cycles:
-        raise RuntimeError(f"Manifest contains no cycles: {path}")
+    periods = manifest.get("periods")
+    if not isinstance(periods, list) or not periods:
+        raise RuntimeError(f"Manifest contains no monthly periods: {path}")
+    for index, period in enumerate(periods):
+        if not isinstance(period, dict) or period.get("index") != index:
+            raise RuntimeError(f"Invalid monthly period at index {index} in {path}")
+        value = period.get("period")
+        dates = period.get("dates")
+        if not isinstance(value, str) or len(value) != 6 or not isinstance(dates, list) or not dates:
+            raise RuntimeError(f"Invalid monthly period contract at index {index} in {path}")
+        if any(not isinstance(date, str) or date[:6] != value for date in dates):
+            raise RuntimeError(f"Monthly period {value} contains an invalid cycle date in {path}")
+        if period.get("message_count") != len(dates) * MESSAGES_PER_CYCLE:
+            raise RuntimeError(f"Monthly period {value} has an invalid message count in {path}")
     return manifest
 
 
-def _manifest_cycle(manifest: dict[str, object], index: int) -> dict[str, object]:
-    cycles = manifest.get("cycles")
-    if not isinstance(cycles, list) or not (0 <= index < len(cycles)):
-        raise IndexError(f"Backfill index {index} is outside 0..{len(cycles) - 1 if isinstance(cycles, list) else -1}")
-    cycle = cycles[index]
-    if not isinstance(cycle, dict) or cycle.get("index") != index:
-        raise RuntimeError(f"Invalid cycle entry at index {index}")
-    return cycle
+def _manifest_period(manifest: dict[str, object], index: int) -> dict[str, object]:
+    periods = manifest.get("periods")
+    if not isinstance(periods, list) or not (0 <= index < len(periods)):
+        raise IndexError(f"Backfill index {index} is outside 0..{len(periods) - 1 if isinstance(periods, list) else -1}")
+    period = periods[index]
+    if not isinstance(period, dict) or period.get("index") != index:
+        raise RuntimeError(f"Invalid monthly period at index {index}")
+    return period
 
 
-def _verified_day_complete(manifest: dict[str, object], date: str) -> bool:
-    output_root = Path(str(manifest["output_root"]))
-    algorithm = str(manifest["diagnostic_algorithm"])
+def _verified_day_complete(*, output_root: Path, algorithm: str, date: str) -> bool:
     run_dir = output_root / REA_MODEL / date / "0000"
     done_path = run_dir / "DONE.json"
     if not done_path.is_file():
@@ -219,6 +315,169 @@ def _verified_day_complete(manifest: dict[str, object], date: str) -> bool:
     )
 
 
+def _archive_path(manifest: dict[str, object], period: dict[str, object]) -> Path:
+    relative = Path(str(period["archive"]))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise RuntimeError(f"Invalid archive path in period {period.get('period')}")
+    return Path(str(manifest["output_root"])) / relative
+
+
+def _receipt_path(manifest_path: Path, period: dict[str, object]) -> Path:
+    index = period.get("index")
+    if not isinstance(index, int):
+        raise RuntimeError(f"Invalid index for period {period.get('period')}")
+    return manifest_path.parent / "receipts" / f"{index:05d}-{period['period']}.json"
+
+
+def _expected_archive_messages(period: dict[str, object]) -> list[tuple[str, int]]:
+    dates = period.get("dates")
+    if not isinstance(dates, list):
+        raise RuntimeError(f"Invalid dates for period {period.get('period')}")
+    return [(str(date), step) for date in dates for step in range(1, MESSAGES_PER_CYCLE + 1)]
+
+
+def _manifest_dates(manifest: dict[str, object]) -> list[str]:
+    periods = manifest.get("periods")
+    if not isinstance(periods, list):
+        raise RuntimeError("Backfill manifest does not contain monthly periods")
+    return [
+        str(date)
+        for period in periods
+        if isinstance(period, dict)
+        for date in period.get("dates", [])
+    ]
+
+
+def _inspect_monthly_archive(path: Path, period: dict[str, object]) -> dict[str, object]:
+    if not path.is_file() or path.stat().st_size < 4:
+        raise RuntimeError(f"Monthly archive is missing or empty: {path}")
+    with path.open("rb") as handle:
+        handle.seek(-4, os.SEEK_END)
+        if handle.read(4) != b"7777":
+            raise RuntimeError(f"Monthly archive has an invalid GRIB terminator: {path}")
+    metadata = read_grib_archive_metadata(path, ARCHIVE_METADATA_KEYS)
+    expected = _expected_archive_messages(period)
+    if len(metadata) != len(expected):
+        raise RuntimeError(f"Monthly archive {path} contains {len(metadata)} messages; expected {len(expected)}")
+    for position, (message, (date, step)) in enumerate(zip(metadata, expected, strict=True), start=1):
+        valid = _parse_date(date) + timedelta(hours=step)
+        expected_metadata: dict[str, object] = {
+            "shortName": OUTPUT_SHORT_NAME,
+            "paramId": OUTPUT_PARAM_ID,
+            "dataDate": int(date),
+            "dataTime": 0,
+            "endStep": step,
+            "validityDate": int(valid.strftime("%Y%m%d")),
+            "validityTime": int(valid.strftime("%H%M")),
+        }
+        mismatches = {
+            key: {"actual": message.get(key), "expected": value}
+            for key, value in expected_metadata.items()
+            if str(message.get(key)) != str(value)
+        }
+        if mismatches:
+            raise RuntimeError(f"Monthly archive {path} message {position} metadata mismatch: {mismatches}")
+    return {
+        "archive_path": str(path),
+        "size_bytes": path.stat().st_size,
+        "message_count": len(metadata),
+        "first_message": metadata[0],
+        "last_message": metadata[-1],
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _staging_prefix(manifest_path: Path, index: int, period: str) -> str:
+    manifest_key = hashlib.sha256(str(manifest_path.resolve()).encode()).hexdigest()[:12]
+    return f"ptype-{manifest_key}-{index:05d}-{period}-"
+
+
+def _remove_stale_staging(staging_root: Path, prefix: str) -> None:
+    for stale in staging_root.glob(f"{prefix}*"):
+        if stale.is_symlink():
+            stale.unlink()
+        elif stale.is_dir():
+            shutil.rmtree(stale)
+
+
+def _append_file(source: Path, destination: BinaryIO, digest: _Digest) -> None:
+    with source.open("rb") as handle:
+        while chunk := handle.read(8 * 1024 * 1024):
+            destination.write(chunk)
+            digest.update(chunk)
+
+
+def _archive_receipt_complete(
+    *,
+    manifest_path: Path,
+    manifest: dict[str, object],
+    period: dict[str, object],
+    verify_outputs: bool,
+) -> bool:
+    receipt_path = _receipt_path(manifest_path, period)
+    archive_path = _archive_path(manifest, period)
+    if not receipt_path.is_file() or not archive_path.is_file():
+        return False
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if receipt.get("ok") is not True or str(receipt.get("archive_path")) != str(archive_path):
+            return False
+        receipt_size = receipt.get("size_bytes")
+        receipt_messages = receipt.get("message_count")
+        expected_messages = period.get("message_count")
+        if not isinstance(receipt_size, int) or receipt_size != archive_path.stat().st_size:
+            return False
+        if not isinstance(receipt_messages, int) or not isinstance(expected_messages, int):
+            return False
+        if receipt_messages != expected_messages:
+            return False
+        if verify_outputs:
+            _inspect_monthly_archive(archive_path, period)
+            receipt_sha256 = receipt.get("sha256")
+            if not isinstance(receipt_sha256, str) or receipt_sha256 != _sha256_file(archive_path):
+                return False
+    except Exception:
+        return False
+    return True
+
+
+def _ensure_archive_contract(manifest: dict[str, object]) -> None:
+    dates = _manifest_dates(manifest)
+    contract = {
+        "schema_version": 1,
+        "model": REA_MODEL,
+        "diagnostic_algorithm": manifest["diagnostic_algorithm"],
+        "output_format": "grib2_multi_message",
+        "archive_period": ARCHIVE_PERIOD,
+        "archive_ordering": "cycle_date_then_end_step",
+        "cycle_time": "0000",
+        "start_step": 1,
+        "max_step": MESSAGES_PER_CYCLE,
+        "shortName": OUTPUT_SHORT_NAME,
+        "paramId": OUTPUT_PARAM_ID,
+        "cycle_date_range": manifest["cycle_date_range"],
+        "selected_cycles": len(dates),
+        "cycle_dates_sha256": hashlib.sha256("\n".join(dates).encode()).hexdigest(),
+    }
+    path = Path(str(manifest["output_root"])) / REA_MODEL / "ARCHIVE_CONTRACT.json"
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Cannot read archive contract {path}: {exc}") from exc
+        if existing != contract:
+            raise RuntimeError(f"Archive contract mismatch at {path}; use a separate output root")
+        return
+    _atomic_write_json(contract, path)
+
+
 def run_manifest_task(
     *,
     manifest_path: Path,
@@ -231,114 +490,212 @@ def run_manifest_task(
     lock_timeout_s: float = 0.0,
 ) -> dict[str, object]:
     manifest = load_manifest(manifest_path)
-    cycle = _manifest_cycle(manifest, index)
-    date = str(cycle["date"])
-    output_root = Path(str(manifest["output_root"]))
+    period = _manifest_period(manifest, index)
+    period_name = str(period["period"])
+    dates = period.get("dates")
+    if not isinstance(dates, list):
+        raise RuntimeError(f"Invalid cycle dates for monthly period {period_name}")
+    staging_root = Path(str(manifest["staging_root"]))
     algorithm = str(manifest["diagnostic_algorithm"])
-    receipt_path = manifest_path.parent / "receipts" / f"{index:05d}-{date}.json"
-    if _verified_day_complete(manifest, date):
+    receipt_path = _receipt_path(manifest_path, period)
+    archive_path = _archive_path(manifest, period)
+    partial_path = archive_path.with_name(f".{archive_path.name}.partial")
+    lock = CycleLock(manifest_path.parent / "locks" / f"{index:05d}-{period_name}.lock", timeout_s=lock_timeout_s)
+    lock.acquire()
+    attempt = 1
+    try:
+        _ensure_archive_contract(manifest)
+        previous_receipt: dict[str, object] = {}
+        if receipt_path.is_file():
+            try:
+                loaded_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                if isinstance(loaded_receipt, dict):
+                    previous_receipt = loaded_receipt
+            except Exception:
+                previous_receipt = {}
+        if archive_path.is_file():
+            try:
+                archive_info = _inspect_monthly_archive(archive_path, period)
+            except Exception:
+                pass
+            else:
+                partial_path.unlink(missing_ok=True)
+                receipt = {
+                    "index": index,
+                    "period": period_name,
+                    "dates": dates,
+                    "status": "verified_existing",
+                    "ok": True,
+                    "diagnostic_algorithm": algorithm,
+                    "algorithm_fidelity": previous_receipt.get("algorithm_fidelity"),
+                    "provenance": previous_receipt.get("provenance"),
+                    "daily_results": previous_receipt.get("daily_results"),
+                    **archive_info,
+                    "sha256": _sha256_file(archive_path),
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                }
+                _atomic_write_json(receipt, receipt_path)
+                return receipt
+
+        previous_attempt = previous_receipt.get("attempt", 0)
+        attempt = previous_attempt + 1 if isinstance(previous_attempt, int) else 1
+
+        staging_root.mkdir(parents=True, exist_ok=True)
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        partial_path.unlink(missing_ok=True)
+        staging_prefix = _staging_prefix(manifest_path, index, period_name)
+        _remove_stale_staging(staging_root, staging_prefix)
+        digest = hashlib.sha256()
+        day_results: list[dict[str, object]] = []
+        algorithm_fidelity: object = None
+        provenance: object = None
+        with tempfile.TemporaryDirectory(prefix=staging_prefix, dir=staging_root) as temporary:
+            task_staging_root = Path(temporary)
+            with partial_path.open("wb") as archive_handle:
+                for raw_date in dates:
+                    date = str(raw_date)
+                    summary = run_operational(
+                        model=REA_MODEL,
+                        output_root=task_staging_root,
+                        algorithm=algorithm,
+                        members=("000",),
+                        date=date,
+                        time_value="0000",
+                        start_step=1,
+                        max_step=MODEL_SPECS[REA_MODEL].max_step,
+                        workers=workers,
+                        chunk_size=chunk_size,
+                        check_output_files=True,
+                        write_probability_products=False,
+                        output_format="grib2",
+                        run_id=f"rea-l-ch1-{date}",
+                        event_id=f"{manifest_path.name}:{index}:{period_name}",
+                        attempt=attempt,
+                        fdb_retries=fdb_retries,
+                        fdb_retry_initial_s=fdb_retry_initial_s,
+                        fdb_retry_max_s=fdb_retry_max_s,
+                        resume=True,
+                        lock_timeout_s=0.0,
+                    )
+                    monitoring = summary.get("monitoring", {})
+                    if not isinstance(monitoring, dict) or monitoring.get("ok") is not True:
+                        raise RuntimeError(f"REA-L-CH1 daily cycle {date} failed monitoring")
+                    if not _verified_day_complete(output_root=task_staging_root, algorithm=algorithm, date=date):
+                        raise RuntimeError(f"REA-L-CH1 daily cycle {date} failed output verification")
+                    if algorithm_fidelity is None:
+                        algorithm_fidelity = summary.get("algorithm_fidelity")
+                    if provenance is None:
+                        provenance = summary.get("provenance")
+                    for step in range(1, MESSAGES_PER_CYCLE + 1):
+                        source = member_grib_path(task_staging_root, REA_MODEL, date, "0000", "000", step)
+                        _append_file(source, archive_handle, digest)
+                    day_results.append(
+                        {
+                            "date": date,
+                            "wall_s": summary.get("wall_s"),
+                            "data_quality": summary.get("data_quality"),
+                            "retry_stats": summary.get("retry_stats"),
+                        }
+                    )
+                    shutil.rmtree(task_staging_root / REA_MODEL / date)
+                archive_handle.flush()
+                os.fsync(archive_handle.fileno())
+
+            archive_info = _inspect_monthly_archive(partial_path, period)
+            os.replace(partial_path, archive_path)
+            archive_info["archive_path"] = str(archive_path)
         receipt = {
             "index": index,
-            "date": date,
-            "status": "verified_existing",
+            "period": period_name,
+            "dates": dates,
+            "status": "complete",
             "ok": True,
-            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "attempt": attempt,
+            "diagnostic_algorithm": algorithm,
+            "algorithm_fidelity": algorithm_fidelity,
+            "provenance": provenance,
+            **archive_info,
+            "sha256": digest.hexdigest(),
+            "daily_results": day_results,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
         }
         _atomic_write_json(receipt, receipt_path)
         return receipt
-
-    attempt = 1
-    if receipt_path.is_file():
-        try:
-            previous_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-            attempt = int(previous_receipt.get("attempt", 0)) + 1
-        except Exception:
-            attempt = 1
-
-    try:
-        summary = run_operational(
-            model=REA_MODEL,
-            output_root=output_root,
-            algorithm=algorithm,
-            members=("000",),
-            date=date,
-            time_value="0000",
-            start_step=1,
-            max_step=MODEL_SPECS[REA_MODEL].max_step,
-            workers=workers,
-            chunk_size=chunk_size,
-            check_output_files=True,
-            write_probability_products=False,
-            output_format="grib2",
-            run_id=f"rea-l-ch1-{date}",
-            event_id=f"{manifest_path.name}:{index}",
-            attempt=attempt,
-            fdb_retries=fdb_retries,
-            fdb_retry_initial_s=fdb_retry_initial_s,
-            fdb_retry_max_s=fdb_retry_max_s,
-            resume=True,
-            lock_timeout_s=lock_timeout_s,
-        )
     except Exception as exc:
+        partial_path.unlink(missing_ok=True)
         receipt = {
             "index": index,
-            "date": date,
+            "period": period_name,
+            "dates": dates,
             "status": "critical",
             "ok": False,
             "attempt": attempt,
+            "diagnostic_algorithm": algorithm,
             "error": f"{type(exc).__name__}: {exc}",
             "finished_at": datetime.now(timezone.utc).isoformat(),
         }
         _atomic_write_json(receipt, receipt_path)
         raise
-    monitoring = summary.get("monitoring", {})
-    ok = isinstance(monitoring, dict) and monitoring.get("ok") is True
-    receipt = {
-        "index": index,
-        "date": date,
-        "status": "complete" if ok else "critical",
-        "ok": ok,
-        "attempt": attempt,
-        "summary_json": str(output_root / REA_MODEL / date / "0000" / "summary.json"),
-        "monitoring_json": str(output_root / REA_MODEL / date / "0000" / "monitoring.json"),
-        "finished_at": datetime.now(timezone.utc).isoformat(),
-    }
-    _atomic_write_json(receipt, receipt_path)
-    return receipt
+    finally:
+        lock.release()
 
 
 def campaign_status(*, manifest_path: Path, verify_outputs: bool = False) -> dict[str, object]:
     manifest = load_manifest(manifest_path)
-    output_root = Path(str(manifest["output_root"]))
-    cycles = manifest["cycles"]
-    if not isinstance(cycles, list):
-        raise RuntimeError(f"Invalid cycles in {manifest_path}")
+    periods = manifest["periods"]
+    if not isinstance(periods, list):
+        raise RuntimeError(f"Invalid monthly periods in {manifest_path}")
     complete: list[str] = []
     failed: list[str] = []
     pending: list[str] = []
-    for cycle in cycles:
-        if not isinstance(cycle, dict):
-            raise RuntimeError(f"Invalid cycle entry in {manifest_path}")
-        date = str(cycle["date"])
-        run_dir = output_root / REA_MODEL / date / "0000"
-        if (run_dir / "FAILED.json").is_file():
-            failed.append(date)
-        elif (run_dir / "DONE.json").is_file() and (not verify_outputs or _verified_day_complete(manifest, date)):
-            complete.append(date)
+    complete_cycles = 0
+    failed_dates: list[str] = []
+    pending_dates: list[str] = []
+    for period in periods:
+        if not isinstance(period, dict):
+            raise RuntimeError(f"Invalid monthly period entry in {manifest_path}")
+        period_name = str(period["period"])
+        dates = [str(value) for value in period.get("dates", [])]
+        receipt_path = _receipt_path(manifest_path, period)
+        receipt_status: object = None
+        if receipt_path.is_file():
+            try:
+                receipt_status = json.loads(receipt_path.read_text(encoding="utf-8")).get("status")
+            except Exception:
+                receipt_status = None
+        if receipt_status == "critical":
+            failed.append(period_name)
+            failed_dates.extend(dates)
+        elif _archive_receipt_complete(
+            manifest_path=manifest_path,
+            manifest=manifest,
+            period=period,
+            verify_outputs=verify_outputs,
+        ):
+            complete.append(period_name)
+            complete_cycles += len(dates)
         else:
-            pending.append(date)
+            pending.append(period_name)
+            pending_dates.extend(dates)
+    total_cycles = sum(len(period.get("dates", [])) for period in periods if isinstance(period, dict))
     status: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "manifest_path": str(manifest_path.resolve()),
         "model": REA_MODEL,
-        "total_cycles": len(cycles),
-        "complete_cycles": len(complete),
-        "failed_cycles": len(failed),
-        "pending_cycles": len(pending),
+        "total_periods": len(periods),
+        "complete_periods": len(complete),
+        "failed_periods": len(failed),
+        "pending_periods": len(pending),
+        "total_cycles": total_cycles,
+        "complete_cycles": complete_cycles,
+        "failed_cycles": len(failed_dates),
+        "pending_cycles": len(pending_dates),
         "complete": not failed and not pending,
         "verified_outputs": verify_outputs,
-        "failed_dates": failed,
-        "pending_dates": pending,
+        "failed_period_names": failed,
+        "pending_period_names": pending,
+        "failed_dates": failed_dates,
+        "pending_dates": pending_dates,
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
     _atomic_write_json(status, manifest_path.parent / "campaign-status.json")
@@ -354,9 +711,9 @@ def write_slurm_array_script(
     wall_time: str = "06:00:00",
 ) -> Path:
     manifest = load_manifest(manifest_path)
-    cycles = manifest["cycles"]
-    if not isinstance(cycles, list):
-        raise RuntimeError(f"Invalid cycles in {manifest_path}")
+    periods = manifest["periods"]
+    if not isinstance(periods, list):
+        raise RuntimeError(f"Invalid monthly periods in {manifest_path}")
     if concurrency <= 0:
         raise ValueError(f"concurrency must be positive, got {concurrency}")
     if not partition.startswith("pp-"):
@@ -364,13 +721,19 @@ def write_slurm_array_script(
     repo_root = Path(__file__).resolve().parents[2]
     quoted_repo_root = shlex.quote(str(repo_root))
     quoted_manifest = shlex.quote(str(manifest_path.resolve()))
+    log_dir = manifest_path.parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_pattern = str((log_dir / "%A_%a.out").resolve())
+    if any(character.isspace() for character in log_pattern):
+        raise ValueError(f"Slurm log path must not contain whitespace: {log_pattern}")
     text = f"""#!/usr/bin/env bash
 #SBATCH --job-name=ptype-rea
 #SBATCH --partition={partition}
 #SBATCH --time={wall_time}
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --array=0-{len(cycles) - 1}%{concurrency}
+#SBATCH --array=0-{len(periods) - 1}%{concurrency}
+#SBATCH --output={log_pattern}
 
 set -euo pipefail
 [ -f /etc/profile.d/modules.sh ] && . /etc/profile.d/modules.sh
@@ -387,7 +750,7 @@ exec tools/run_balfrin.sh backfill-task {quoted_manifest} "$SLURM_ARRAY_TASK_ID"
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Plan, run, and verify ICON-REA-L-CH1 daily backfills")
+    parser = argparse.ArgumentParser(description="Plan, run, and verify monthly ICON-REA-L-CH1 GRIB2 archives")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     plan = subparsers.add_parser("plan")
@@ -395,6 +758,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--end-date", required=True)
     plan.add_argument("--output-root", type=Path, required=True)
     plan.add_argument("--manifest", type=Path, required=True)
+    plan.add_argument("--staging-root", type=Path)
     plan.add_argument("--algorithm", choices=DIAGNOSTIC_ALGORITHMS, default=ALGORITHM_FIRDEWSA)
     plan.add_argument("--allow-missing-dates", action="store_true")
     plan.add_argument("--slurm-script", type=Path)
@@ -426,6 +790,7 @@ def main() -> int:
             end_date=args.end_date,
             output_root=args.output_root,
             manifest_path=args.manifest,
+            staging_root=args.staging_root,
             algorithm=args.algorithm,
             allow_missing_dates=args.allow_missing_dates,
         )

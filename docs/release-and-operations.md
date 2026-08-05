@@ -15,8 +15,9 @@ Before tagging or promotion:
 3. Run scheduled Balfrin acceptance jobs from the exact candidate revision:
    CH1 progressive steps 1 then 2 plus a 45-hour-cycle horizon check, CH2
    progressive steps 1 then 2, a complete
-   REA day with a partial-run restart, and representative early/middle/late REA
-   inventory dates.
+   REA monthly archive containing representative daily cycles, including a
+   failed/partial task followed by atomic restart, and representative
+   early/middle/late REA inventory dates.
 4. Test both algorithms when science or FDB selection changed. ICON science
    changes also require the pinned executable Fortran comparison.
 5. Inspect at least one member and probability product per realtime model and
@@ -97,24 +98,36 @@ Planning is inventory-backed and uses inclusive cycle dates:
 
 ```bash
 CAMPAIGN=/users/$USER/work/ptype-rea-campaign
+STAGING_ROOT=$SCRATCH/ptype-rea-campaign
+ARCHIVE_ROOT=/store_new/mch/msopr/$USER/ptype-rea-campaign
 tools/run_balfrin.sh backfill-plan \
   --start-date 20050101 --end-date 20250831 \
-  --output-root "$CAMPAIGN/output" \
+  --output-root "$ARCHIVE_ROOT" \
+  --staging-root "$STAGING_ROOT" \
   --manifest "$CAMPAIGN/manifest.json"
 sbatch "$CAMPAIGN/manifest.sbatch"
 ```
 
-The generated `pp-long` array assigns one 00 UTC cycle and steps 1..24 to each
-task. Each task writes a receipt under `receipts/`, records its attempt in the
-run summary, and returns non-zero on critical monitoring. The manifest is the
-immutable campaign contract; create a new campaign directory to change dates,
-algorithm, output root, or missing-date policy.
+The schema-v2 manifest groups exact inventory dates by calendar month. The
+generated `pp-long` array assigns one month to each task. A task processes every
+selected day independently at `0000` and steps `1..24` in bounded scratch,
+concatenates the validated GRIB messages in cycle-date/step order, verifies the
+complete stream, and atomically publishes one monthly file. Each task writes a
+monthly receipt under `receipts/` and returns non-zero on critical monitoring.
+The manifest is immutable; use a new campaign and output root to change dates,
+algorithm, archive bounds, or missing-date policy. Schema-v1 daily manifests
+remain tied to `v0.3.0` and must be re-planned for the monthly layout.
 
 A verified 24-file Firdewsa day used about 55.1 MB and 157 seconds. The
 `20050101..20250831` calendar range projects to about 416 GB (`0.38 TiB`) of
-categorical GRIB2; require at least `0.5 TiB` plus the agreed retention margin
-before submitting the full array. Recalculate from a representative day when
-packing, grid, algorithm, or archive bounds change.
+categorical GRIB2 in 248 monthly archive files. Including receipts, locks,
+Slurm logs, the archive contract, manifest, script, and campaign status, the
+planner projects 249 files in the archive root, 747 in the campaign root, and
+996 persistent files in total. Require at least `0.5 TiB` plus the agreed
+retention margin before submitting the full array. With eight concurrent
+monthly tasks, 157--158 seconds per day gives about 41 hours of ideal wall time;
+reserve about two days plus queue and retry margin. Recalculate from a
+representative day when packing, grid, algorithm, or archive bounds change.
 
 Check progress cheaply, then verify all outputs before acceptance:
 
@@ -123,9 +136,12 @@ tools/run_balfrin.sh backfill-status "$CAMPAIGN/manifest.json"
 tools/run_balfrin.sh backfill-status "$CAMPAIGN/manifest.json" --verify-outputs
 ```
 
-Re-submit specific failed/pending indices with Slurm's `--array` override. A
-task skips only a verified complete day. Otherwise it reruns the complete daily
-cycle; it never differences step 24 of one day against the next day's step 0.
+Re-submit specific failed/pending monthly indices with Slurm's `--array`
+override. A task skips only a complete archive whose receipt, size, message
+count, dates, steps, validity metadata, and SHA-256 checksum match the manifest
+and archive. Otherwise it reruns that month. The worst restart unit is one
+month; each constituent day still starts from step 0 and never differences step
+24 against another cycle.
 
 ## Concurrency and publication safety
 
@@ -133,6 +149,12 @@ One `.progressive.lock` serializes realtime orchestration and one `.cycle.lock`
 serializes core publication for a model/cycle/output root. The lock file may
 remain after a run because the kernel lock, not file existence, determines
 ownership. Do not remove a lock file while a process may be active.
+
+REA uses one campaign-root lock per monthly index. Staging and archive roots
+must not overlap. A task writes a hidden partial file on the destination
+filesystem, validates it, calls `fsync`, and publishes with an atomic rename.
+Never have multiple tasks or shell commands append directly to the same monthly
+target, even though concatenated GRIB messages are a valid GRIB2 stream.
 
 `CONTRACT.json` is immutable. A different algorithm, output format, mask,
 vertical cutoff, or probability mode requires a different output root.
@@ -152,8 +174,9 @@ Each core run writes:
 Monitoring is critical for failed or incomplete members, fatal data quality,
 missing expected files, strict probability failure, exhausted FDB retries, or a
 configured wall-time violation. Start incident review with `CYCLE.json` for
-realtime or `campaign-status.json` for REA, then inspect the referenced
-monitoring file, summary, receipt, and logs.
+realtime or `campaign-status.json` for REA, then inspect the monthly receipt and
+Slurm log. Daily summaries and monitoring files are transient staging evidence;
+the receipt retains their compact wall-time, data-quality, and retry summaries.
 
 Retries are limited to transient FDB listing, retrieval, and decoding.
 Scientific validation, shape, category, completeness, contract, and publication

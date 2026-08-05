@@ -7,8 +7,9 @@ The production contract is deliberately small:
 
 - realtime EPS runs progressively process newly ingested forecast hours for all
   members and publish member NetCDF plus strict ensemble probabilities;
-- REA-L-CH1 backfills process independent daily 00 UTC cycles and publish
-  categorical GRIB2;
+- REA-L-CH1 backfills process independent daily 00 UTC cycles, concatenate the
+  24 validated records per day in chronological order, and atomically publish
+  one categorical multi-message GRIB2 archive per month;
 - `firdewsa` is the production default. The optional `icon` mode is an offline
   adaptation whose archived-input limitations are recorded in every summary.
 
@@ -69,25 +70,38 @@ publication; omit it in normal production.
 ## B. REA-L-CH1 backfill
 
 Plan an inclusive range of daily cycle dates. The planner checks FDB inventory,
-writes an immutable manifest, and generates a Slurm array script:
+groups the available dates into monthly tasks, writes an immutable manifest,
+and generates a Slurm array script:
 
 ```bash
 CAMPAIGN=/users/$USER/work/ptype-rea-2005-2025
+STAGING_ROOT=$SCRATCH/ptype-rea-2005-2025
+ARCHIVE_ROOT=/store_new/mch/msopr/$USER/ptype-rea-2005-2025
 tools/run_balfrin.sh backfill-plan \
   --start-date 20050101 --end-date 20250831 \
-  --output-root "$CAMPAIGN/output" \
+  --output-root "$ARCHIVE_ROOT" \
+  --staging-root "$STAGING_ROOT" \
   --manifest "$CAMPAIGN/manifest.json"
 sbatch "$CAMPAIGN/manifest.sbatch"
 ```
 
 Use a smaller date range for a subset. Missing FDB cycle dates fail planning by
 default; `--allow-missing-dates` records and excludes them explicitly. The
-generated script uses `pp-long`, one daily cycle per array task, and a default
-concurrency of 8. Change planning options such as `--concurrency`,
-`--partition`, or `--wall-time` before submission when operations require it.
-The measured categorical output projects to roughly `0.38 TiB` for
-`20050101..20250831`; reserve at least `0.5 TiB` plus the local retention margin
-before launching the full archive.
+generated script uses `pp-long`, one month per array task, and a default
+concurrency of 8. Every task still processes its dates one daily `0000` cycle at
+a time under `STAGING_ROOT`; only the validated monthly archive is published to
+`ARCHIVE_ROOT`. Staging and output roots are required not to overlap.
+
+The measured categorical output projects to about `416 GB` (`0.38 TiB`) for
+`20050101..20250831`. The 7,548 daily cycles become 248 monthly GRIB2 archives
+instead of 181,152 single-message files. Only 249 files land in the archive
+root (248 months plus `ARCHIVE_CONTRACT.json`); 747 receipts, locks, logs, and
+control files remain under the campaign root, for about 996 persistent files in
+total. At the measured 157--158 seconds per daily cycle, the default eight-way
+monthly array projects to roughly 41 hours of ideal wall time; budget about two
+days plus queue and retry margin. Reserve at least `0.5 TiB` plus the local
+retention margin and confirm the current long-term mount before launching the
+full campaign.
 
 Check campaign state with:
 
@@ -96,10 +110,13 @@ tools/run_balfrin.sh backfill-status "$CAMPAIGN/manifest.json"
 tools/run_balfrin.sh backfill-status "$CAMPAIGN/manifest.json" --verify-outputs
 ```
 
-The status command exits non-zero while work is pending or failed. Re-submit
-failed array indices with the generated script. A task skips only a day with a
-successful marker and all 24 readable outputs; partial or failed days are safe
-to run again.
+The status command exits non-zero while a month is pending or failed.
+`--verify-outputs` scans every GRIB message and checks its source date, step, and
+validity time against the manifest, then recomputes the receipt checksum.
+Re-submit failed monthly array indices with the generated script. A task skips
+only a complete validated monthly archive; otherwise it reruns that month.
+Schema-v1 daily manifests belong to release `v0.3.0`; re-plan them with the
+current version to use the inode-safe layout.
 
 ### REA accumulation and date semantics
 
@@ -113,6 +130,9 @@ The tool therefore treats every cycle independently:
 
 Manifest dates are cycle dates, not valid dates. A campaign ending with cycle
 `20250831` includes a final interval ending at `20250901 00 UTC`.
+Concatenation changes no GRIB message bytes or metadata. Messages are ordered by
+cycle date and then step `1..24`; tasks never append concurrently to the same
+published month.
 
 ## Supported data
 
@@ -130,21 +150,34 @@ accumulations start at the daily 00 UTC cycle.
 ## Outputs and restart contract
 
 ```text
-<output-root>/<MODEL>/<YYYYMMDD>/<HHMM>/
+<realtime-output>/<MODEL>/<YYYYMMDD>/<HHMM>/
 ├── CONTRACT.json
-├── CYCLE.json                         # progressive realtime authority
-├── increments/*.summary.json          # progressive increment evidence
+├── CYCLE.json
+├── increments/*.summary.json
 ├── increments/*.monitoring.json
-├── <member>/lfffDDHHMMSS.ptype.nc     # realtime
-├── <member>/lfffDDHHMMSS.ptype.grib2  # REA
-├── probabilities/*.ptype_prob.nc      # realtime
+├── <member>/lfffDDHHMMSS.ptype.nc
+├── probabilities/*.ptype_prob.nc
 ├── summary.json
 ├── monitoring.json
 └── DONE.json or FAILED.json
+
+<rea-archive-root>/ICON-REA-L-CH1/
+├── ARCHIVE_CONTRACT.json
+└── <YYYY>/ptype_ICON-REA-L-CH1_<YYYYMM>.grib2
+
+<campaign-root>/
+├── manifest.json
+├── manifest.sbatch
+├── campaign-status.json
+├── receipts/<index>-<YYYYMM>.json
+├── locks/<index>-<YYYYMM>.lock
+└── logs/<job>_<index>.out
 ```
 
 `CONTRACT.json` prevents mixing algorithms, formats, masks, vertical cutoffs, or
-probability modes in one cycle directory.
+probability modes in one realtime cycle directory. `ARCHIVE_CONTRACT.json`
+binds a REA archive root to one algorithm and the manifest's exact cycle-date
+set, preventing a partial-month campaign from replacing another campaign.
 `RUNNING.json` exists during an increment and is atomically replaced by
 `DONE.json` or `FAILED.json`. For progressive realtime, `CYCLE.json` is the
 full-cycle authority: `status=ingesting` is healthy before the model horizon,
@@ -153,8 +186,10 @@ means the last increment needs attention.
 
 Probability products are strict across every model member and use percent
 values (`0..100`). Member NetCDF contains `ptype` and the diagnostic variables
-needed for aggregation. REA GRIB2 preserves the source grid/run template and
-encodes the packaged MeteoSwiss `PTYPE` definition.
+needed for aggregation. Each REA monthly archive is an ordinary GRIB2 stream:
+ecCodes and other GRIB tools read its messages sequentially, while every record
+preserves the source grid/run template and packaged MeteoSwiss `PTYPE`
+definition.
 
 ## Ad-hoc cycle and CLI
 
@@ -173,7 +208,9 @@ The lower-level CLI remains available as `python -m precip_type_diag` or
 
 ## Monitoring and troubleshooting
 
-Start with `monitoring.json`, then `summary.json["failed"]` and the run log.
+For realtime, start with `monitoring.json`, then `summary.json["failed"]` and the
+run log. For REA, start with `campaign-status.json`, the monthly receipt, and its
+Slurm log.
 Deterministic science, validation, completeness, and output errors fail visibly;
 only transient FDB list, retrieve, and decode failures are retried.
 
@@ -185,6 +222,8 @@ only transient FDB list, retrieve, and decode failures are retried.
   `PRECIP_TYPE_DIAG_COSMO_DEFS` to the reviewed MeteoSwiss definitions.
 - locked cycle: another writer owns `.cycle.lock` or `.progressive.lock`; wait
   for it or investigate the recorded lock owner before retrying.
+- locked REA month: another array task owns the corresponding campaign lock;
+  wait for it rather than appending or deleting the lock file.
 
 ## Local development
 
@@ -217,5 +256,6 @@ run as scheduled jobs on Balfrin.
 - [Science and architecture](docs/science-and-architecture.md)
 - [Release and operations](docs/release-and-operations.md)
 - [Release checklist](docs/release-checklist.md)
+- [v0.4.0 monthly archive acceptance evidence](docs/acceptance/2026-08-05-v0.4.0-monthly-archive.md)
 - [v0.3.0 release acceptance evidence](docs/acceptance/2026-08-04-v0.3.0-candidate.md)
 - [Provenance and licensing](docs/provenance.md)

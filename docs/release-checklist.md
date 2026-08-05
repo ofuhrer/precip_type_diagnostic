@@ -53,7 +53,7 @@ exact command, Slurm job ID/log, summary, monitoring file, and inspection.
 | CH1 realtime | Firdewsa | bounded step 1, then step 2; prior probability retained | |
 | CH1 long cycle | Firdewsa | `0300` cycle records a 45-hour horizon | |
 | CH2 realtime | Firdewsa | bounded step 1, then step 2; prior probability retained | |
-| REA daily | Firdewsa | partial output followed by full 1..24 restart | |
+| REA monthly | Firdewsa | daily 1..24 semantics, ordered multi-message archive, failed task followed by atomic restart | |
 | REA early era | Firdewsa | inventory/retrieval/output inspection | |
 | REA middle era | Firdewsa | inventory/retrieval/output inspection | |
 | REA late era | Firdewsa | inventory/retrieval/output inspection | |
@@ -69,17 +69,20 @@ For each executed row require:
 - restart evidence shows no mixed contract and no loss of an earlier product.
 
 For REA confirm `time=0000`, cycle `D` steps `1..24`, and final valid time
-`D+1 00 UTC`. For ICON mode confirm all three archived grid-scale microphysics
+`D+1 00 UTC`; confirm one task owns the month, the archive has exactly 24
+ordered messages per selected cycle, and no daily staging files remain in the
+archive root. For ICON mode confirm all three archived grid-scale microphysics
 accumulations passed completeness checks and the summary reports unavailable
 online convective/hail components.
 
 ## Backfill campaign readiness
 
 - Inventory manifest date range and missing-date policy reviewed:
-- Generated Slurm partition, wall time, array size, and concurrency reviewed:
-- One task receipt and retry attempt reviewed:
+- Monthly grouping, staging root, archive root, and schema version reviewed:
+- Generated Slurm partition, wall time, monthly array size, and concurrency reviewed:
+- One monthly receipt, checksum, failed attempt, and restart reviewed:
 - `backfill-status --verify-outputs` result:
-- Storage estimate and retention owner:
+- Storage, file-count estimate, filesystem quota, and retention owner:
 
 ## Decision and rollback
 

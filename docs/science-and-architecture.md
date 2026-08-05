@@ -81,7 +81,9 @@ start at its daily 00 UTC cycle and end at step 24. Cycle `D`, step 24 is valid
 at `D+1 00 UTC`; it still belongs to cycle `D`. The implementation enforces REA
 `time=0000`, caps the run at step 24, and never crosses a daily boundary. The
 backfill manifest therefore records cycle-date bounds and the corresponding
-valid-time coverage separately.
+valid-time coverage separately. Monthly archive packing happens only after each
+daily cycle has passed monitoring and output verification; it does not combine
+or difference accumulations across cycle dates.
 
 Production starts at step 1; step 0 only initializes the first delta. The CLI
 accepts `--start-step 0` for debugging, but that output is not a physically
@@ -139,10 +141,12 @@ FDB discovery/checks -> HHL selection -> chunk retrieval -> array validation
 - `realtime.py` owns progressive EPS ingestion. It advances only through the
   latest contiguous complete hour, runs all members, preserves earlier
   probability hours, and records full-cycle state in `CYCLE.json`.
-- `backfill.py` owns immutable REA inventory manifests, one-day Slurm array
-  tasks, receipts, restart verification, and campaign status.
+- `backfill.py` owns immutable REA inventory manifests, monthly Slurm array
+  tasks, bounded daily staging, chronological GRIB concatenation, atomic
+  monthly publication, receipts, restart verification, and campaign status.
 - `gribio.py` writes GRIB2 from the current `TOT_PREC` template, preserving grid
-  and run metadata while replacing parameter metadata and values.
+  and run metadata while replacing parameter metadata and values. It also
+  iterates metadata from multi-message archives for publication verification.
 - `netcdfio.py` writes member data; `probabilities.py` strictly aggregates every
   requested member. NetCDF currently has generic `cell` or `y/x` dimensions,
   without geospatial coordinates or a grid mapping.
@@ -153,6 +157,11 @@ FDB discovery/checks -> HHL selection -> chunk retrieval -> array validation
   prevent concurrent publishers.
 - Core increments atomically publish `RUNNING.json`, then `DONE.json` or
   `FAILED.json`. `CYCLE.json` is authoritative for progressive full-cycle state.
+- A REA array task owns exactly one month. It invokes the unchanged daily core
+  for each selected `0000` cycle in scratch, concatenates the 24 verified GRIB2
+  messages in date/step order, validates the complete stream, and atomically
+  renames it into the archive root. Workers never append concurrently to a
+  published archive.
 - Retries cover transient FDB list, retrieve, and decode/materialization
   failures only; deterministic failures remain visible.
 

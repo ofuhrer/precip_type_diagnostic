@@ -315,6 +315,23 @@ def read_grib_metadata(path: Path, keys: tuple[str, ...]) -> dict[str, object]:
             eccodes.codes_release(message_id)
 
 
+def read_grib_archive_metadata(path: Path, keys: tuple[str, ...]) -> list[dict[str, object]]:
+    """Read selected metadata from every GRIB message in file order."""
+
+    bootstrap_eccodes_definitions()
+    messages: list[dict[str, object]] = []
+    with path.open("rb") as handle:
+        while True:
+            message_id = eccodes.codes_grib_new_from_file(handle)
+            if message_id is None:
+                break
+            try:
+                messages.append({key: eccodes.codes_get(message_id, key) for key in keys})
+            finally:
+                eccodes.codes_release(message_id)
+    return messages
+
+
 def read_categorical_grib(path: Path) -> GribFieldMessage:
     field = read_single_grib_message(path)
     categorical = _check_categorical_codes(field.values, tuple(field.values.shape))

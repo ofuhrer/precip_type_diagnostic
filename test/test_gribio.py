@@ -13,6 +13,7 @@ from precip_type_diag.gribio import (
     bootstrap_eccodes_definitions,
     check_precip_mask_threshold_mm,
     derive_vertical_level_selection,
+    read_grib_archive_metadata,
     write_output_grib,
 )
 
@@ -105,6 +106,23 @@ def test_output_grib_metadata_is_stable(tmp_path: Path) -> None:
     assert output_field.metadata("Nx") == template_field.metadata("Nx")
     assert output_field.metadata("Ny") == template_field.metadata("Ny")
     np.testing.assert_allclose(output_field.to_numpy(), np.array([[13.0, 1.0], [5.0, 8.0]]))
+
+
+def test_multi_message_grib_archive_metadata_is_read_in_file_order(tmp_path: Path) -> None:
+    bootstrap_eccodes_definitions()
+    template_path = tmp_path / "template.grib2"
+    template_field = _write_template_grib(template_path)
+    output_path = tmp_path / "ptype.grib2"
+    write_output_grib(template_field, np.array([[13, 1], [5, 8]], dtype=np.int32), output_path)
+    archive_path = tmp_path / "archive.grib2"
+    archive_path.write_bytes(output_path.read_bytes() + output_path.read_bytes())
+
+    metadata = read_grib_archive_metadata(archive_path, ("dataDate", "endStep", "shortName"))
+
+    assert len(metadata) == 2
+    assert [message["dataDate"] for message in metadata] == [20260423, 20260423]
+    assert [message["endStep"] for message in metadata] == [1, 1]
+    assert all(message["shortName"] in {OUTPUT_SHORT_NAME, "ptype"} for message in metadata)
 
 
 def test_output_grib_write_is_atomic_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

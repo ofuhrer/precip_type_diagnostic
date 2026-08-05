@@ -13,7 +13,7 @@ Usage:
 Accepted production defaults:
   algorithm: Firdewsa
   realtime:  all members, progressive NetCDF diagnostics and probabilities
-  REA:       member 000, daily steps 1..24, categorical GRIB2
+  REA:       member 000, daily steps 1..24, atomic monthly GRIB2 archives
 USAGE
 }
 
