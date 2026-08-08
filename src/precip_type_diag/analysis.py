@@ -923,11 +923,22 @@ def _finalize_event(event: dict[str, object] | None, events: list[dict[str, obje
 def _source_data_quality(manifest: dict[str, object]) -> dict[str, int]:
     source_manifest_path = Path(str(manifest["source_manifest_path"]))
     totals: defaultdict[str, int] = defaultdict(int)
-    for receipt_path in sorted((source_manifest_path.parent / "receipts").glob("*.json")):
+    periods = manifest.get("periods")
+    if not isinstance(periods, list):
+        raise RuntimeError("analysis periods are invalid while collecting source data quality")
+    receipt_paths: list[Path] = []
+    for period in periods:
+        if not isinstance(period, dict):
+            raise RuntimeError("analysis period is invalid while collecting source data quality")
+        source_index = int(str(period.get("source_index", period["index"])))
+        receipt_paths.append(source_manifest_path.parent / "receipts" / f"{source_index:05d}-{period['period']}.json")
+    for receipt_path in receipt_paths:
+        if not receipt_path.is_file():
+            raise RuntimeError(f"source campaign receipt is missing: {receipt_path}")
         try:
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+        except Exception as exc:
+            raise RuntimeError(f"source campaign receipt is invalid: {receipt_path}") from exc
         for result in receipt.get("daily_results") or []:
             if not isinstance(result, dict) or not isinstance(result.get("data_quality"), dict):
                 continue

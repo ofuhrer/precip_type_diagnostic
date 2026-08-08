@@ -125,6 +125,10 @@ def _write_source_archive(path: Path, *, date: str = "20100131") -> None:
 def _analysis_manifest(tmp_path: Path) -> tuple[Path, Path, Path]:
     source_manifest_path = tmp_path / "source-campaign" / "manifest.json"
     _atomic_write_json({"source": "synthetic"}, source_manifest_path)
+    _atomic_write_json(
+        {"daily_results": [{"data_quality": {"clamped_negative_total_precip_deltas": 7}}]},
+        source_manifest_path.parent / "receipts" / "00000-201001.json",
+    )
     source_root = tmp_path / "source-products"
     source_archive = source_root / "ICON-REA-L-CH1" / "2010" / "ptype_ICON-REA-L-CH1_201001.grib2"
     _write_source_archive(source_archive)
@@ -240,6 +244,7 @@ def test_analysis_reducer_writes_frequency_events_and_quality_report(tmp_path: P
     assert report["temporal_gap_or_duplicate_count"] == 0
     assert report["four_bit_exact_decoded_validation"] is True
     assert report["high_impact_event_count"] == 1
+    assert report["source_generation_data_quality"] == {"clamped_negative_total_precip_deltas": 7}
 
     with netCDF4.Dataset(output_root / "ptype_frequency.nc") as dataset:
         assert dataset.variables["annual_valid_hours"][:].tolist() == [24]
