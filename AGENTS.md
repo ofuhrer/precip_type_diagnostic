@@ -95,8 +95,9 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
   receipt/status contracts.
 - Archive analysis must preserve the source tree, use a disjoint output root,
   group by GRIB validity time, verify decoded source/compact equality, and
-  publish compact GRIB plus statistics atomically. Four-bit PTYPE packing is
-  exact; never change only packing metadata without repacking values. Do not
+  publish compact GRIB plus statistics atomically. Non-constant PTYPE fields
+  use exact four-bit packing; GRIB constant fields canonically use zero bits.
+  Never change only packing metadata without repacking values. Do not
   report physical area unless a reviewed cell-area field is supplied.
 - Fail visibly on deterministic science, shape, validation, and completeness
   errors. Retry only transient FDB list, retrieve, and decode failures.

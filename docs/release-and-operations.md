@@ -161,7 +161,7 @@ month; each constituent day still starts from step 0 and never differences step
 ## REA archive-analysis scheduling
 
 Run analysis against a completed source campaign and a new output root. The
-source manifest SHA-256, source root, category contract, four-bit packing, and
+source manifest SHA-256, source root, category contract, exact categorical packing, and
 valid-time semantics are immutable in `ANALYSIS_CONTRACT.json`. The standard
 submission command creates a monthly `pp-long` array and submits the reducer
 with `afterok:<array-job-id>`.
@@ -184,7 +184,8 @@ tasks are complete. Never point analysis output or staging inside the source
 archive tree.
 
 Acceptance requires a real month with all expected messages, exact decoded
-source/compact equality, `bitsPerValue=4`, correct step-24 valid-month transfer,
+source/compact equality, `bitsPerValue=4` for non-constant fields and the GRIB
+canonical `bitsPerValue=0` only for constant fields, correct step-24 valid-month transfer,
 restart reuse, a successful reducer, readable Parquet/NetCDF products, and a
 passing data-quality report. Do not infer physical event area from cell count;
 the source PTYPE message has no cell-area field.

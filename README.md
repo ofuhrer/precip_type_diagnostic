@@ -160,9 +160,15 @@ manifest.
 The submission creates one resumable monthly `pp-long` task per source archive
 and a reducer with an `afterok` dependency. Every task scans the source once,
 validates metadata, time, grid, missingness, and category codes, accumulates
-valid-time statistics, repacks each message to four bits, then independently
+valid-time statistics, repacks each non-constant message to four bits, then independently
 rereads the compact archive and compares the decoded SHA-256 before atomic
 publication. The source archive is never modified.
+
+GRIB simple packing canonically represents a spatially constant field with
+`bitsPerValue=0`, because no per-point coded values are needed. The exact
+packing contract is therefore four bits for every non-constant field and zero
+bits only for a verified constant field; forcing a constant field's metadata to
+four bits without rebuilding its data section corrupts the decoded values.
 
 The completed `20050101..20250831` source contains 181,152 hourly fields on
 1,147,980 grid points and occupies 408,677,897,928 bytes. Four-bit simple

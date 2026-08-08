@@ -94,7 +94,7 @@ converted to the full current accumulator.
 - Completed immutable source manifest/root reviewed:
 - Separate staging and analysis output roots reviewed:
 - One-month source and four-bit decoded SHA-256 equality:
-- Four-bit size, packing keys, and category range inspected:
+- Four-bit non-constant fields, zero-bit constant fields, size, and category range inspected:
 - Step-24 following-month contribution verified:
 - Hourly Parquet grain and UTC continuity verified:
 - Monthly/seasonal/annual/full-period NetCDF counts verified:

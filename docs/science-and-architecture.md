@@ -134,8 +134,11 @@ reviewed performance/science contract, not a tuning parameter.
 
 The package includes an ecCodes overlay for MeteoSwiss `PTYPE`. Output writers
 validate shape, finite integer values, and the allowed code set. New categorical
-GRIB output uses four-bit simple packing. Codes 0 through 13 are represented
-exactly; missingness remains a separate GRIB bitmap contract.
+GRIB output uses four-bit simple packing for non-constant fields. Codes 0
+through 13 are represented exactly; ecCodes canonically uses
+`bitsPerValue=0` when every grid point has the same value, and validation
+permits that exception only for a decoded constant field. Missingness remains
+a separate GRIB bitmap contract.
 
 ## Archive quality control and analysis
 

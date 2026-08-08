@@ -109,9 +109,14 @@ def _write_source_archive(path: Path, *, date: str = "20100131") -> None:
                     "bitsPerValue": 16,
                 }.items():
                     eccodes.codes_set(handle_id, key, value)
-                values = np.array([3, 13, 0, 1], dtype=float) if step == 1 else np.array([0, 0, 5, 1], dtype=float)
+                if step == 1:
+                    values = np.array([3, 13, 0, 1], dtype=float)
+                elif step == 6:
+                    values = np.zeros(4, dtype=float)
+                else:
+                    values = np.array([0, 0, 5, 1], dtype=float)
                 eccodes.codes_set_values(handle_id, values)
-                assert eccodes.codes_get(handle_id, "bitsPerValue") == 16
+                assert eccodes.codes_get(handle_id, "bitsPerValue") == (0 if step == 6 else 16)
                 eccodes.codes_write(handle_id, output)
             finally:
                 eccodes.codes_release(handle_id)
@@ -181,8 +186,8 @@ def test_analysis_task_repackages_exactly_and_groups_by_valid_month(tmp_path: Pa
 
     assert receipt["ok"] is True
     assert receipt["message_count"] == 24
-    assert receipt["source_archive"]["bits_per_value_counts"] == {"16": 24}
-    assert receipt["compact_archive"]["bits_per_value"] == 4
+    assert receipt["source_archive"]["bits_per_value_counts"] == {"0": 1, "16": 23}
+    assert receipt["compact_archive"]["bits_per_value_counts"] == {"0": 1, "4": 23}
     assert receipt["decoded_sha256"]
     assert receipt["compression_ratio"] > 1.0
     assert source_archive.read_bytes() == source_bytes

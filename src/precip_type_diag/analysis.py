@@ -252,6 +252,7 @@ def _ensure_contract(manifest: dict[str, object]) -> None:
         "source_manifest_sha256": manifest["source_manifest_sha256"],
         "source_archive_root": manifest["source_archive_root"],
         "compact_bits_per_value": PTYPE_BITS_PER_VALUE,
+        "constant_field_bits_per_value": 0,
         "category_codes": list(CATEGORY_CODES),
         "high_impact_codes": list(HIGH_IMPACT_CODES),
         "valid_time_grouping": "GRIB validityDate and validityTime",
@@ -464,6 +465,7 @@ def _validate_compact_archive(path: Path, period: dict[str, object]) -> dict[str
     message_count = 0
     grid_uuid = ""
     npoint = 0
+    bits_per_value_counts: Counter[int] = Counter()
     with path.open("rb") as handle:
         while True:
             message_id = eccodes.codes_grib_new_from_file(handle)
@@ -475,9 +477,16 @@ def _validate_compact_archive(path: Path, period: dict[str, object]) -> dict[str
                 date, step = expected[message_count]
                 metadata = _message_metadata(message_id)
                 _validate_metadata(metadata, date, step, position=message_count + 1, path=path)
-                if int(str(metadata["bitsPerValue"])) != PTYPE_BITS_PER_VALUE:
-                    raise RuntimeError(f"compact archive message {message_count + 1} is not four-bit packed")
                 values = _categorical_values(message_id, position=message_count + 1, path=path)
+                bits_per_value = int(str(metadata["bitsPerValue"]))
+                constant = bool(np.all(values == values[0]))
+                expected_bits = 0 if constant else PTYPE_BITS_PER_VALUE
+                if bits_per_value != expected_bits:
+                    raise RuntimeError(
+                        f"compact archive message {message_count + 1} has bitsPerValue={bits_per_value}; "
+                        f"expected {expected_bits} for {'constant' if constant else 'non-constant'} values"
+                    )
+                bits_per_value_counts[bits_per_value] += 1
                 decoded_digest.update(values.tobytes())
                 current_uuid = str(metadata.get("uuidOfHGrid") or "")
                 current_npoint = int(str(metadata["numberOfDataPoints"]))
@@ -497,6 +506,7 @@ def _validate_compact_archive(path: Path, period: dict[str, object]) -> dict[str
         "size_bytes": path.stat().st_size,
         "grid_uuid": grid_uuid,
         "number_of_grid_points": npoint,
+        "bits_per_value_counts": {str(key): value for key, value in sorted(bits_per_value_counts.items())},
     }
 
 
@@ -650,9 +660,9 @@ def run_analysis_task(*, manifest_path: Path, index: int, lock_timeout_s: float 
                     eccodes.codes_set(message_id, "bitsPerValue", PTYPE_BITS_PER_VALUE)
                     eccodes.codes_set_values(message_id, categorical)
                     repacked = np.asarray(eccodes.codes_get_values(message_id)).astype(np.uint8)
-                    if int(eccodes.codes_get(message_id, "bitsPerValue")) != PTYPE_BITS_PER_VALUE or not np.array_equal(
-                        categorical, repacked
-                    ):
+                    packed_bits = int(eccodes.codes_get(message_id, "bitsPerValue"))
+                    expected_bits = 0 if bool(np.all(categorical == categorical[0])) else PTYPE_BITS_PER_VALUE
+                    if packed_bits != expected_bits or not np.array_equal(categorical, repacked):
                         raise RuntimeError(f"four-bit in-memory verification failed at message {position + 1}")
                     packed_message = eccodes.codes_get_message(message_id)
                     compact_handle.write(packed_message)
@@ -696,7 +706,9 @@ def run_analysis_task(*, manifest_path: Path, index: int, lock_timeout_s: float 
                 "path": str(compact_path),
                 "size_bytes": compact_path.stat().st_size,
                 "sha256": compact_sha256.hexdigest(),
-                "bits_per_value": PTYPE_BITS_PER_VALUE,
+                "nonconstant_bits_per_value": PTYPE_BITS_PER_VALUE,
+                "constant_bits_per_value": 0,
+                "bits_per_value_counts": compact_check["bits_per_value_counts"],
             },
             "monthly_statistics": {
                 "path": str(statistics_path),
@@ -1233,6 +1245,7 @@ def reduce_analysis(*, manifest_path: Path) -> dict[str, object]:
         "compact_size_bytes": compact_size,
         "compression_ratio": source_size / compact_size,
         "four_bit_exact_decoded_validation": True,
+        "constant_field_packing": "GRIB simple packing uses bitsPerValue=0 for constant fields",
         "source_generation_data_quality": _source_data_quality(manifest),
         "high_impact_event_count": len(events),
         "physical_area_limitation": "Cell areas are unavailable in PTYPE GRIB; event extent uses grid-cell counts and domain fraction.",
