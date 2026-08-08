@@ -190,6 +190,11 @@ restart reuse, a successful reducer, readable Parquet/NetCDF products, and a
 passing data-quality report. Do not infer physical event area from cell count;
 the source PTYPE message has no cell-area field.
 
+The accepted 248-month v0.5.0 pass used concurrency eight: its array wall time
+was 36 minutes 29 seconds, its reducer took 89 seconds, and its derived output
+was 103,676,920,634 bytes in 754 files. See the dated acceptance record for
+packing counts, product sizes, and physical-plausibility evidence.
+
 ## Concurrency and publication safety
 
 One `.progressive.lock` serializes realtime orchestration and one `.cycle.lock`

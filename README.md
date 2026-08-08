@@ -171,9 +171,10 @@ bits only for a verified constant field; forcing a constant field's metadata to
 four bits without rebuilding its data section corrupts the decoded values.
 
 The completed `20050101..20250831` source contains 181,152 hourly fields on
-1,147,980 grid points and occupies 408,677,897,928 bytes. Four-bit simple
-packing projects to about 104 GB; a representative source message shrank from
-2,296,159 to 574,189 bytes with exact decoded equality.
+1,147,980 grid points and occupies 408,677,897,928 bytes. The accepted full
+pass produced 102,196,511,418 bytes of compact GRIB and a 103,676,920,634-byte
+derived tree with 754 files. At concurrency eight, the 248 monthly tasks took
+36 minutes 29 seconds of array wall time and the reducer took 89 seconds.
 
 ```text
 <analysis-output>/
