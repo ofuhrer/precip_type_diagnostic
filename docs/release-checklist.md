@@ -102,6 +102,9 @@ converted to the full current accumulator.
 - Event definition and cell-area limitation reviewed:
 - Failed/partial monthly task and restart reviewed:
 - Reducer restart and `analysis-status --verify-outputs` result:
+- If compact promotion/source retirement is in scope: full-range equality,
+  exact source inventory, dual promotion receipts, exact-path deletion, dual
+  retirement receipts, and post-retirement `analysis-status --verify-outputs`:
 - Full campaign storage, file count, partition, concurrency, and retention owner:
 
 ## Decision and rollback

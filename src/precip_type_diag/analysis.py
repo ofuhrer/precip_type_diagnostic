@@ -40,6 +40,10 @@ ANALYSIS_MANIFEST_SCHEMA_VERSION = 1
 ANALYSIS_MANIFEST_MODE = "rea_l_ch1_analysis_preparation"
 ANALYSIS_CONTRACT_SCHEMA_VERSION = 1
 REDUCTION_SCHEMA_VERSION = 1
+COMPACT_ARCHIVE_PROMOTION_SCHEMA_VERSION = 1
+SOURCE_RETIREMENT_SCHEMA_VERSION = 1
+COMPACT_ARCHIVE_PROMOTION_FILENAME = "COMPACT_ARCHIVE_PROMOTION.json"
+SOURCE_RETIREMENT_FILENAME = "SOURCE_RETIREMENT.json"
 CATEGORY_CODES = tuple(int(code) for code in PrecipitationTypeCode)
 CATEGORY_NAMES = tuple(PRECIPITATION_TYPE_NAMES[PrecipitationTypeCode(code)] for code in CATEGORY_CODES)
 HIGH_IMPACT_CODES = (
@@ -70,6 +74,14 @@ def _sha256_file(path: Path) -> str:
         while chunk := handle.read(8 * 1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _write_immutable_json(payload: dict[str, object], path: Path) -> None:
+    if path.is_file():
+        if json.loads(path.read_text(encoding="utf-8")) != payload:
+            raise RuntimeError(f"Immutable contract mismatch at {path}")
+        return
+    _atomic_write_json(payload, path)
 
 
 def _safe_relative(value: object, *, label: str) -> Path:
@@ -241,6 +253,16 @@ def _output_path(manifest: dict[str, object], period: dict[str, object], key: st
 
 def _receipt_path(manifest_path: Path, period: dict[str, object]) -> Path:
     return manifest_path.parent / "receipts" / f"{int(str(period['index'])):05d}-{period['period']}.json"
+
+
+def _promotion_paths(manifest_path: Path, manifest: dict[str, object]) -> tuple[Path, Path]:
+    filename = COMPACT_ARCHIVE_PROMOTION_FILENAME
+    return manifest_path.parent / filename, Path(str(manifest["output_root"])) / filename
+
+
+def _retirement_paths(manifest_path: Path, manifest: dict[str, object]) -> tuple[Path, Path]:
+    filename = SOURCE_RETIREMENT_FILENAME
+    return manifest_path.parent / filename, Path(str(manifest["output_root"])) / filename
 
 
 def _ensure_contract(manifest: dict[str, object]) -> None:
@@ -462,6 +484,7 @@ def _validate_compact_archive(path: Path, period: dict[str, object]) -> dict[str
     bootstrap_eccodes_definitions()
     expected = _expected_messages(period)
     decoded_digest = hashlib.sha256()
+    byte_digest = hashlib.sha256()
     message_count = 0
     grid_uuid = ""
     npoint = 0
@@ -478,6 +501,7 @@ def _validate_compact_archive(path: Path, period: dict[str, object]) -> dict[str
                 metadata = _message_metadata(message_id)
                 _validate_metadata(metadata, date, step, position=message_count + 1, path=path)
                 values = _categorical_values(message_id, position=message_count + 1, path=path)
+                byte_digest.update(eccodes.codes_get_message(message_id))
                 bits_per_value = int(str(metadata["bitsPerValue"]))
                 constant = bool(np.all(values == values[0]))
                 expected_bits = 0 if constant else PTYPE_BITS_PER_VALUE
@@ -502,12 +526,108 @@ def _validate_compact_archive(path: Path, period: dict[str, object]) -> dict[str
     return {
         "message_count": message_count,
         "decoded_sha256": decoded_digest.hexdigest(),
-        "sha256": _sha256_file(path),
+        "sha256": byte_digest.hexdigest(),
         "size_bytes": path.stat().st_size,
         "grid_uuid": grid_uuid,
         "number_of_grid_points": npoint,
         "bits_per_value_counts": {str(key): value for key, value in sorted(bits_per_value_counts.items())},
     }
+
+
+def _validate_source_archive(path: Path, period: dict[str, object]) -> dict[str, object]:
+    bootstrap_eccodes_definitions()
+    expected = _expected_messages(period)
+    decoded_digest = hashlib.sha256()
+    byte_digest = hashlib.sha256()
+    message_count = 0
+    grid_uuid = ""
+    npoint = 0
+    bits_per_value_counts: Counter[int] = Counter()
+    with path.open("rb") as handle:
+        while True:
+            message_id = eccodes.codes_grib_new_from_file(handle)
+            if message_id is None:
+                break
+            try:
+                if message_count >= len(expected):
+                    raise RuntimeError(f"source archive has more than {len(expected)} messages: {path}")
+                date, step = expected[message_count]
+                metadata = _message_metadata(message_id)
+                _validate_metadata(metadata, date, step, position=message_count + 1, path=path)
+                values = _categorical_values(message_id, position=message_count + 1, path=path)
+                byte_digest.update(eccodes.codes_get_message(message_id))
+                decoded_digest.update(values.tobytes())
+                bits_per_value_counts[int(str(metadata["bitsPerValue"]))] += 1
+                current_uuid = str(metadata.get("uuidOfHGrid") or "")
+                current_npoint = int(str(metadata["numberOfDataPoints"]))
+                if message_count == 0:
+                    grid_uuid, npoint = current_uuid, current_npoint
+                elif current_uuid != grid_uuid or current_npoint != npoint:
+                    raise RuntimeError(f"source archive grid changed at message {message_count + 1}")
+                message_count += 1
+            finally:
+                eccodes.codes_release(message_id)
+    if message_count != len(expected):
+        raise RuntimeError(f"source archive has {message_count} messages; expected {len(expected)}")
+    return {
+        "message_count": message_count,
+        "decoded_sha256": decoded_digest.hexdigest(),
+        "sha256": byte_digest.hexdigest(),
+        "size_bytes": path.stat().st_size,
+        "mtime_ns": path.stat().st_mtime_ns,
+        "grid_uuid": grid_uuid,
+        "number_of_grid_points": npoint,
+        "bits_per_value_counts": {str(key): value for key, value in sorted(bits_per_value_counts.items())},
+    }
+
+
+def _load_retired_source_entries(
+    *, manifest_path: Path, manifest: dict[str, object]
+) -> dict[str, dict[str, object]] | None:
+    campaign_promotion_path, output_promotion_path = _promotion_paths(manifest_path, manifest)
+    campaign_retirement_path, output_retirement_path = _retirement_paths(manifest_path, manifest)
+    if not all(
+        path.is_file()
+        for path in (campaign_promotion_path, output_promotion_path, campaign_retirement_path, output_retirement_path)
+    ):
+        return None
+    try:
+        promotion = json.loads(campaign_promotion_path.read_text(encoding="utf-8"))
+        if promotion != json.loads(output_promotion_path.read_text(encoding="utf-8")):
+            return None
+        retirement = json.loads(campaign_retirement_path.read_text(encoding="utf-8"))
+        if retirement != json.loads(output_retirement_path.read_text(encoding="utf-8")):
+            return None
+        if (
+            promotion.get("schema_version") != COMPACT_ARCHIVE_PROMOTION_SCHEMA_VERSION
+            or promotion.get("status") != "promoted"
+            or promotion.get("analysis_manifest_sha256") != _sha256_file(manifest_path)
+            or promotion.get("source_archive_root") != str(Path(str(manifest["source_archive_root"])).resolve())
+            or promotion.get("compact_archive_root") != str((Path(str(manifest["output_root"])) / "compact").resolve())
+            or retirement.get("schema_version") != SOURCE_RETIREMENT_SCHEMA_VERSION
+            or retirement.get("status") != "complete"
+            or retirement.get("promotion_sha256") != _sha256_file(campaign_promotion_path)
+            or retirement.get("source_archive_root") != promotion.get("source_archive_root")
+            or retirement.get("deleted_periods") != len(cast(list[object], promotion.get("periods")))
+            or retirement.get("remaining_source_files") != 0
+        ):
+            return None
+        raw_entries = promotion.get("periods")
+        if not isinstance(raw_entries, list):
+            return None
+        entries: dict[str, dict[str, object]] = {}
+        for entry in raw_entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("period"), str):
+                return None
+            entries[str(entry["period"])] = entry
+        periods = manifest.get("periods")
+        if not isinstance(periods, list) or set(entries) != {
+            str(period["period"]) for period in periods if isinstance(period, dict)
+        }:
+            return None
+        return entries
+    except Exception:
+        return None
 
 
 def _receipt_complete(
@@ -528,24 +648,35 @@ def _receipt_complete(
             period["source_archive"], label="source archive"
         )
         source_evidence = receipt.get("source_archive")
-        if (
-            not source_path.is_file()
-            or not isinstance(source_evidence, dict)
-            or source_evidence.get("size_bytes") != source_path.stat().st_size
-        ):
+        if not isinstance(source_evidence, dict):
             return False
+        if source_path.is_file():
+            if source_evidence.get("size_bytes") != source_path.stat().st_size:
+                return False
+        else:
+            retired_entries = _load_retired_source_entries(manifest_path=manifest_path, manifest=manifest)
+            retired = retired_entries.get(str(period["period"])) if retired_entries is not None else None
+            if (
+                retired is None
+                or retired.get("source_archive") != source_evidence
+                or retired.get("decoded_sha256") != receipt.get("decoded_sha256")
+            ):
+                return False
         for key in ("compact_archive", "monthly_statistics", "hourly_counts"):
             path = _output_path(manifest, period, key)
             evidence = receipt.get(key)
             if not path.is_file() or not isinstance(evidence, dict) or evidence.get("size_bytes") != path.stat().st_size:
                 return False
-            if verify_outputs and evidence.get("sha256") != _sha256_file(path):
+            if verify_outputs and key != "compact_archive" and evidence.get("sha256") != _sha256_file(path):
                 return False
         if verify_outputs:
-            if source_evidence.get("sha256") != _sha256_file(source_path):
+            if source_path.is_file() and source_evidence.get("sha256") != _sha256_file(source_path):
                 return False
             compact = _validate_compact_archive(_output_path(manifest, period, "compact_archive"), period)
-            if compact["decoded_sha256"] != receipt.get("decoded_sha256"):
+            if (
+                compact["decoded_sha256"] != receipt.get("decoded_sha256")
+                or compact["sha256"] != cast(dict[str, object], receipt["compact_archive"]).get("sha256")
+            ):
                 return False
     except Exception:
         return False
@@ -576,6 +707,11 @@ def run_analysis_task(*, manifest_path: Path, index: int, lock_timeout_s: float 
         ):
             return json.loads(receipt_path.read_text(encoding="utf-8"))
         if not source_path.is_file():
+            if _load_retired_source_entries(manifest_path=manifest_path, manifest=manifest) is not None:
+                raise RuntimeError(
+                    f"compact analysis output for {period_name} is invalid and its source archive was intentionally retired; "
+                    "restore the source from backup before regeneration"
+                )
             raise RuntimeError(f"source monthly archive is missing: {source_path}")
         staging_root.mkdir(parents=True, exist_ok=True)
         compact_path.parent.mkdir(parents=True, exist_ok=True)
@@ -786,6 +922,7 @@ def analysis_status(*, manifest_path: Path, verify_outputs: bool = False) -> dic
         else:
             pending.append(name)
     output_root = Path(str(manifest["output_root"]))
+    retired_entries = _load_retired_source_entries(manifest_path=manifest_path, manifest=manifest)
     reduction_path = output_root / "REDUCTION.json"
     reduction_complete = False
     if reduction_path.is_file():
@@ -824,10 +961,319 @@ def analysis_status(*, manifest_path: Path, verify_outputs: bool = False) -> dic
         "failed_period_names": failed,
         "pending_period_names": pending,
         "verified_outputs": verify_outputs,
+        "source_retired": retired_entries is not None,
+        "canonical_compact_archive_root": str((output_root / "compact").resolve()) if retired_entries is not None else None,
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
     _atomic_write_json(result, manifest_path.parent / "analysis-status.json")
     return result
+
+
+def _verify_file_evidence(path: Path, evidence: object, *, label: str) -> None:
+    if not isinstance(evidence, dict):
+        raise RuntimeError(f"{label} evidence is invalid")
+    if not path.is_file():
+        raise RuntimeError(f"{label} is missing: {path}")
+    if path.is_symlink():
+        raise RuntimeError(f"{label} must not be a symlink: {path}")
+    if Path(str(evidence.get("path"))).resolve() != path.resolve():
+        raise RuntimeError(f"{label} receipt path does not match {path}")
+    if evidence.get("size_bytes") != path.stat().st_size or evidence.get("sha256") != _sha256_file(path):
+        raise RuntimeError(f"{label} changed after its receipt was written: {path}")
+
+
+def _validate_full_source_selection(manifest: dict[str, object]) -> None:
+    source_manifest_path = Path(str(manifest["source_manifest_path"]))
+    source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+    source_periods = source_manifest.get("periods")
+    analysis_periods = manifest.get("periods")
+    if not isinstance(source_periods, list) or not isinstance(analysis_periods, list):
+        raise RuntimeError("source retirement requires valid source and analysis period lists")
+    source_contract = [
+        (
+            str(period.get("period")),
+            str(period.get("archive")),
+            int(str(period.get("message_count"))),
+            tuple(str(date) for date in cast(list[object], period.get("dates"))),
+        )
+        for period in source_periods
+        if isinstance(period, dict) and isinstance(period.get("dates"), list)
+    ]
+    analysis_contract = [
+        (
+            str(period.get("period")),
+            str(period.get("source_archive")),
+            int(str(period.get("message_count"))),
+            tuple(str(date) for date in cast(list[object], period.get("dates"))),
+        )
+        for period in analysis_periods
+        if isinstance(period, dict) and isinstance(period.get("dates"), list)
+    ]
+    if len(source_contract) != len(source_periods) or source_contract != analysis_contract:
+        raise RuntimeError("source retirement is allowed only when the analysis manifest covers every source month exactly")
+
+
+def _validate_reduction_products(manifest: dict[str, object]) -> None:
+    reduction_path = Path(str(manifest["output_root"])) / "REDUCTION.json"
+    if not reduction_path.is_file():
+        raise RuntimeError(f"analysis reduction receipt is missing: {reduction_path}")
+    reduction = json.loads(reduction_path.read_text(encoding="utf-8"))
+    if reduction.get("ok") is not True or not isinstance(reduction.get("products"), dict):
+        raise RuntimeError(f"analysis reduction receipt is incomplete: {reduction_path}")
+    for name, evidence in cast(dict[str, object], reduction["products"]).items():
+        if not isinstance(evidence, dict):
+            raise RuntimeError(f"reduction evidence for {name} is invalid")
+        _verify_file_evidence(Path(str(evidence.get("path"))), evidence, label=f"reduction product {name}")
+
+
+def _source_inventory(source_root: Path) -> set[Path]:
+    if not source_root.exists():
+        return set()
+    files: set[Path] = set()
+    for path in source_root.rglob("*"):
+        if path.is_symlink():
+            raise RuntimeError(f"source archive tree contains a symlink: {path}")
+        if path.is_file():
+            files.add(path.resolve())
+        elif not path.is_dir():
+            raise RuntimeError(f"source archive tree contains an unsupported filesystem entry: {path}")
+    return files
+
+
+def promote_compact_archive(
+    *,
+    manifest_path: Path,
+    confirmed_source_root: Path,
+    delete_source: bool = False,
+) -> dict[str, object]:
+    """Seal the exact compact replacement and optionally retire the original archive."""
+
+    bootstrap_eccodes_definitions()
+    manifest_path = manifest_path.resolve()
+    manifest = load_analysis_manifest(manifest_path)
+    _validate_full_source_selection(manifest)
+    manifest_source_root = Path(str(manifest["source_archive_root"]))
+    if manifest_source_root.is_symlink() or confirmed_source_root.is_symlink():
+        raise RuntimeError("source archive root and confirmed source root must not be symlinks")
+    source_root = manifest_source_root.resolve()
+    output_root = Path(str(manifest["output_root"])).resolve()
+    if confirmed_source_root.resolve() != source_root:
+        raise RuntimeError(
+            f"confirmed source root {confirmed_source_root.resolve()} does not match manifest source root {source_root}"
+        )
+    if source_root == Path(source_root.anchor) or len(source_root.parts) < 4:
+        raise RuntimeError(f"refusing unsafe source archive root: {source_root}")
+    _ensure_separate_roots(source_root, output_root, Path(str(manifest["staging_root"])))
+    periods = manifest.get("periods")
+    if not isinstance(periods, list) or not periods:
+        raise RuntimeError("analysis manifest has no periods")
+    _ensure_contract(manifest)
+    _validate_reduction_products(manifest)
+
+    campaign_promotion_path, output_promotion_path = _promotion_paths(manifest_path, manifest)
+    existing_promotions = [path for path in (campaign_promotion_path, output_promotion_path) if path.is_file()]
+    promotion: dict[str, object] | None = None
+    if existing_promotions:
+        promotion = json.loads(existing_promotions[0].read_text(encoding="utf-8"))
+        if any(json.loads(path.read_text(encoding="utf-8")) != promotion for path in existing_promotions[1:]):
+            raise RuntimeError("campaign and output promotion contracts disagree")
+        if (
+            promotion.get("schema_version") != COMPACT_ARCHIVE_PROMOTION_SCHEMA_VERSION
+            or promotion.get("status") != "promoted"
+            or promotion.get("analysis_manifest_sha256") != _sha256_file(manifest_path)
+            or promotion.get("source_archive_root") != str(source_root)
+            or promotion.get("compact_archive_root") != str((output_root / "compact").resolve())
+        ):
+            raise RuntimeError("existing compact archive promotion contract does not match this campaign")
+
+    entries: list[dict[str, object]] = []
+    source_bytes = 0
+    compact_bytes = 0
+    expected_source_files: set[Path] = set()
+    prior_entries = {
+        str(entry["period"]): entry
+        for entry in cast(list[dict[str, object]], promotion.get("periods", []) if promotion is not None else [])
+        if isinstance(entry, dict) and isinstance(entry.get("period"), str)
+    }
+    for raw_period in periods:
+        if not isinstance(raw_period, dict):
+            raise RuntimeError("analysis manifest period is invalid")
+        period = raw_period
+        period_name = str(period["period"])
+        receipt_path = _receipt_path(manifest_path, period)
+        if not receipt_path.is_file():
+            raise RuntimeError(f"analysis receipt is missing: {receipt_path}")
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if receipt.get("ok") is not True:
+            raise RuntimeError(f"analysis receipt is incomplete: {receipt_path}")
+        source_path = source_root / _safe_relative(period["source_archive"], label="source archive")
+        compact_path = _output_path(manifest, period, "compact_archive")
+        if compact_path.is_symlink():
+            raise RuntimeError(f"compact archive must not be a symlink: {compact_path}")
+        expected_source_files.add(source_path.resolve())
+        compact_check = _validate_compact_archive(compact_path, period)
+        compact_evidence = receipt.get("compact_archive")
+        expected_message_count = int(str(period["message_count"]))
+        if (
+            not isinstance(compact_evidence, dict)
+            or Path(str(compact_evidence.get("path"))).resolve() != compact_path.resolve()
+            or compact_check["size_bytes"] != compact_evidence.get("size_bytes")
+            or compact_check["sha256"] != compact_evidence.get("sha256")
+            or compact_check["decoded_sha256"] != receipt.get("decoded_sha256")
+            or compact_check["message_count"] != expected_message_count
+            or receipt.get("message_count") != expected_message_count
+        ):
+            raise RuntimeError(f"compact archive does not match receipt for {period_name}")
+        for key in ("monthly_statistics", "hourly_counts"):
+            _verify_file_evidence(_output_path(manifest, period, key), receipt.get(key), label=f"{period_name} {key}")
+
+        prior = prior_entries.get(period_name)
+        if source_path.is_file():
+            source_check = _validate_source_archive(source_path, period)
+            source_evidence = receipt.get("source_archive")
+            if (
+                not isinstance(source_evidence, dict)
+                or Path(str(source_evidence.get("path"))).resolve() != source_path.resolve()
+                or source_check["size_bytes"] != source_evidence.get("size_bytes")
+                or source_check["sha256"] != source_evidence.get("sha256")
+                or source_check["decoded_sha256"] != receipt.get("decoded_sha256")
+                or source_check["decoded_sha256"] != compact_check["decoded_sha256"]
+                or source_check["message_count"] != expected_message_count
+            ):
+                raise RuntimeError(f"source, compact, and receipt evidence disagree for {period_name}")
+            source_mtime_ns = source_check["mtime_ns"]
+        elif prior is not None and prior.get("source_archive") == receipt.get("source_archive"):
+            source_evidence = receipt.get("source_archive")
+            source_mtime_ns = prior.get("source_mtime_ns")
+        else:
+            raise RuntimeError(f"source archive disappeared before a valid promotion was sealed: {source_path}")
+        if not isinstance(source_evidence, dict):
+            raise RuntimeError(f"source archive evidence is invalid for {period_name}")
+        entry = {
+            "period": period_name,
+            "source_relative_path": str(_safe_relative(period["source_archive"], label="source archive")),
+            "compact_relative_path": str(_safe_relative(period["compact_archive"], label="compact archive")),
+            "message_count": int(str(receipt["message_count"])),
+            "decoded_sha256": receipt["decoded_sha256"],
+            "source_archive": source_evidence,
+            "source_mtime_ns": source_mtime_ns,
+            "compact_archive": compact_evidence,
+        }
+        if prior is not None and entry != prior:
+            raise RuntimeError(f"existing promotion evidence changed for {period_name}")
+        entries.append(entry)
+        source_bytes += int(str(source_evidence["size_bytes"]))
+        compact_bytes += int(str(compact_evidence["size_bytes"]))
+
+    archive_contract_path = source_root / "ARCHIVE_CONTRACT.json"
+    archive_contract: dict[str, object]
+    if archive_contract_path.is_file():
+        archive_contract = {
+            "relative_path": "ARCHIVE_CONTRACT.json",
+            "size_bytes": archive_contract_path.stat().st_size,
+            "sha256": _sha256_file(archive_contract_path),
+            "mtime_ns": archive_contract_path.stat().st_mtime_ns,
+        }
+    elif promotion is not None and isinstance(promotion.get("source_archive_contract"), dict):
+        archive_contract = cast(dict[str, object], promotion["source_archive_contract"])
+    else:
+        raise RuntimeError(f"source archive contract is missing: {archive_contract_path}")
+    expected_source_files.add(archive_contract_path.resolve())
+    actual_source_files = _source_inventory(source_root)
+    if promotion is None and actual_source_files != expected_source_files:
+        unexpected = sorted(str(path) for path in actual_source_files - expected_source_files)
+        missing = sorted(str(path) for path in expected_source_files - actual_source_files)
+        raise RuntimeError(f"source archive inventory mismatch; unexpected={unexpected}, missing={missing}")
+    if promotion is not None and not actual_source_files.issubset(expected_source_files):
+        unexpected = sorted(str(path) for path in actual_source_files - expected_source_files)
+        raise RuntimeError(f"source archive contains unexpected files after promotion: {unexpected}")
+
+    if promotion is None:
+        promotion = {
+            "schema_version": COMPACT_ARCHIVE_PROMOTION_SCHEMA_VERSION,
+            "status": "promoted",
+            "analysis_manifest_path": str(manifest_path),
+            "analysis_manifest_sha256": _sha256_file(manifest_path),
+            "source_manifest_path": manifest["source_manifest_path"],
+            "source_manifest_sha256": manifest["source_manifest_sha256"],
+            "source_archive_root": str(source_root),
+            "compact_archive_root": str((output_root / "compact").resolve()),
+            "period_count": len(entries),
+            "message_count": sum(int(str(entry["message_count"])) for entry in entries),
+            "source_size_bytes": source_bytes,
+            "compact_size_bytes": compact_bytes,
+            "reclaimed_size_bytes": source_bytes,
+            "source_archive_contract": archive_contract,
+            "periods": entries,
+            "validation": {
+                "source_and_compact_byte_sha256": True,
+                "source_and_compact_decoded_sha256_equal": True,
+                "compact_packing_validated": True,
+                "monthly_analysis_products_sha256": True,
+                "reduction_products_sha256": True,
+                "source_inventory_exact": True,
+            },
+            "provenance": collect_runtime_provenance(),
+            "promoted_at": datetime.now(timezone.utc).isoformat(),
+        }
+    _write_immutable_json(promotion, campaign_promotion_path)
+    _write_immutable_json(promotion, output_promotion_path)
+    if not delete_source:
+        return promotion
+    already_retired = _load_retired_source_entries(manifest_path=manifest_path, manifest=manifest)
+    if already_retired is not None:
+        if _source_inventory(source_root):
+            raise RuntimeError("retirement receipt exists but source archive files remain")
+        campaign_retirement_path, _ = _retirement_paths(manifest_path, manifest)
+        return cast(dict[str, object], json.loads(campaign_retirement_path.read_text(encoding="utf-8")))
+
+    for entry in cast(list[dict[str, object]], promotion["periods"]):
+        source_path = source_root / _safe_relative(entry["source_relative_path"], label="promoted source archive")
+        if not source_path.exists():
+            continue
+        evidence = cast(dict[str, object], entry["source_archive"])
+        stat = source_path.stat()
+        if stat.st_size != evidence.get("size_bytes"):
+            raise RuntimeError(f"source archive changed before deletion: {source_path}")
+        if stat.st_mtime_ns != entry.get("source_mtime_ns") and _sha256_file(source_path) != evidence.get("sha256"):
+            raise RuntimeError(f"source archive changed before deletion: {source_path}")
+        source_path.unlink()
+    contract_evidence = cast(dict[str, object], promotion["source_archive_contract"])
+    if archive_contract_path.exists():
+        stat = archive_contract_path.stat()
+        if stat.st_size != contract_evidence.get("size_bytes"):
+            raise RuntimeError(f"source archive contract changed before deletion: {archive_contract_path}")
+        if stat.st_mtime_ns != contract_evidence.get("mtime_ns") and _sha256_file(archive_contract_path) != contract_evidence.get("sha256"):
+            raise RuntimeError(f"source archive contract changed before deletion: {archive_contract_path}")
+        archive_contract_path.unlink()
+    if _source_inventory(source_root):
+        raise RuntimeError(f"source archive still contains files after exact retirement pass: {source_root}")
+    if source_root.exists():
+        directories = sorted((path for path in source_root.rglob("*") if path.is_dir()), key=lambda path: len(path.parts), reverse=True)
+        for directory in directories:
+            directory.rmdir()
+        source_root.rmdir()
+    retirement = {
+        "schema_version": SOURCE_RETIREMENT_SCHEMA_VERSION,
+        "status": "complete",
+        "promotion_path": str(campaign_promotion_path),
+        "promotion_sha256": _sha256_file(campaign_promotion_path),
+        "source_archive_root": str(source_root),
+        "canonical_compact_archive_root": promotion["compact_archive_root"],
+        "deleted_periods": len(entries),
+        "deleted_source_bytes": source_bytes,
+        "deleted_archive_contract_bytes": int(str(archive_contract["size_bytes"])),
+        "remaining_source_files": 0,
+        "source_root_removed": not source_root.exists(),
+        "retired_at": datetime.now(timezone.utc).isoformat(),
+    }
+    campaign_retirement_path, output_retirement_path = _retirement_paths(manifest_path, manifest)
+    _write_immutable_json(retirement, campaign_retirement_path)
+    _write_immutable_json(retirement, output_retirement_path)
+    retired_entries = _load_retired_source_entries(manifest_path=manifest_path, manifest=manifest)
+    if retired_entries is None or len(retired_entries) != len(entries):
+        raise RuntimeError("retired-source status contract failed after deletion")
+    return retirement
 
 
 def _monthly_contributions(path: Path) -> list[tuple[str, int, np.ndarray]]:
@@ -1368,6 +1814,14 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status")
     status.add_argument("--manifest", type=Path, required=True)
     status.add_argument("--verify-outputs", action="store_true")
+    retire = subparsers.add_parser("retire-source")
+    retire.add_argument("--manifest", type=Path, required=True)
+    retire.add_argument("--confirm-source-root", type=Path, required=True)
+    retire.add_argument(
+        "--delete-source",
+        action="store_true",
+        help="permanently unlink only the exact source files sealed by the promotion contract",
+    )
     return parser
 
 
@@ -1406,6 +1860,14 @@ def main() -> int:
     if args.command == "reduce":
         reduction = reduce_analysis(manifest_path=args.manifest)
         print(json.dumps(reduction, indent=2, sort_keys=True))
+        return 0
+    if args.command == "retire-source":
+        result = promote_compact_archive(
+            manifest_path=args.manifest,
+            confirmed_source_root=args.confirm_source_root,
+            delete_source=args.delete_source,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     status = analysis_status(manifest_path=args.manifest, verify_outputs=args.verify_outputs)
     print(json.dumps(status, indent=2, sort_keys=True))

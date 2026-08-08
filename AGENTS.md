@@ -40,7 +40,8 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
 - `backfill.py`: REA inventory manifests, monthly tasks, bounded daily staging,
   atomic archives, receipts, and status.
 - `analysis.py`: independent archive QC, exact four-bit repacking, Parquet and
-  NetCDF analysis products, event catalogues, reduction, receipts, and status.
+  NetCDF analysis products, event catalogues, reduction, receipts, controlled
+  compact promotion, exact-path source retirement, and status.
 - `gribio.py`, `netcdfio.py`, `probabilities.py`: product formats and aggregation.
 - `monitoring.py`: operational status and exit contract.
 - `definitions/`: packaged ecCodes `PTYPE` overlay.
@@ -93,12 +94,17 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
 - Preserve immutable `CONTRACT.json`, progressive `CYCLE.json`, locks, verified
   resume, per-increment evidence, `ARCHIVE_CONTRACT.json`, and monthly campaign
   receipt/status contracts.
-- Archive analysis must preserve the source tree, use a disjoint output root,
-  group by GRIB validity time, verify decoded source/compact equality, and
-  publish compact GRIB plus statistics atomically. Non-constant PTYPE fields
-  use exact four-bit packing; GRIB constant fields canonically use zero bits.
-  Never change only packing metadata without repacking values. Do not
-  report physical area unless a reviewed cell-area field is supplied.
+- Archive analysis tasks must preserve the source tree, use a disjoint output
+  root, group by GRIB validity time, verify decoded source/compact equality, and
+  publish compact GRIB plus statistics atomically. Non-constant PTYPE fields use
+  exact four-bit packing; GRIB constant fields canonically use zero bits. Never
+  change only packing metadata without repacking values. Do not report physical
+  area unless a reviewed cell-area field is supplied. Retiring the source is
+  allowed only for an exact full-source analysis after source, compact, monthly,
+  and reduced evidence is sealed in matching promotion receipts. Delete only
+  manifest-listed archives plus the sealed archive contract, never a glob or
+  recursive tree; publish retirement receipts only after the source is absent.
+  The compact tree is then canonical and must remain fully status-verifiable.
 - Fail visibly on deterministic science, shape, validation, and completeness
   errors. Retry only transient FDB list, retrieve, and decode failures.
 - Runs publish `RUNNING.json`, then atomically `DONE.json` or `FAILED.json`;

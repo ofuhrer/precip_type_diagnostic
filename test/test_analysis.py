@@ -124,13 +124,28 @@ def _write_source_archive(path: Path, *, date: str = "20100131") -> None:
 
 def _analysis_manifest(tmp_path: Path) -> tuple[Path, Path, Path]:
     source_manifest_path = tmp_path / "source-campaign" / "manifest.json"
-    _atomic_write_json({"source": "synthetic"}, source_manifest_path)
+    source_relative = "ICON-REA-L-CH1/2010/ptype_ICON-REA-L-CH1_201001.grib2"
+    _atomic_write_json(
+        {
+            "source": "synthetic",
+            "periods": [
+                {
+                    "index": 0,
+                    "period": "201001",
+                    "dates": ["20100131"],
+                    "message_count": 24,
+                    "archive": source_relative,
+                }
+            ],
+        },
+        source_manifest_path,
+    )
     _atomic_write_json(
         {"daily_results": [{"data_quality": {"clamped_negative_total_precip_deltas": 7}}]},
         source_manifest_path.parent / "receipts" / "00000-201001.json",
     )
     source_root = tmp_path / "source-products"
-    source_archive = source_root / "ICON-REA-L-CH1" / "2010" / "ptype_ICON-REA-L-CH1_201001.grib2"
+    source_archive = source_root / source_relative
     _write_source_archive(source_archive)
     output_root = tmp_path / "analysis-products"
     manifest_path = tmp_path / "analysis-campaign" / "manifest.json"
@@ -272,3 +287,69 @@ def test_output_writer_uses_exact_four_bit_packing(tmp_path: Path) -> None:
         np.testing.assert_array_equal(eccodes.codes_get_values(message_id), np.array([3, 13, 0, 1]))
     finally:
         eccodes.codes_release(message_id)
+
+
+def test_compact_promotion_can_retire_source_and_preserve_verified_status(tmp_path: Path) -> None:
+    manifest_path, source_archive, output_root = _analysis_manifest(tmp_path)
+    _atomic_write_json({"schema_version": 1, "archive": "synthetic"}, source_archive.parents[2] / "ARCHIVE_CONTRACT.json")
+    analysis.run_analysis_task(manifest_path=manifest_path, index=0)
+    analysis.reduce_analysis(manifest_path=manifest_path)
+    source_size = source_archive.stat().st_size
+
+    promotion = analysis.promote_compact_archive(
+        manifest_path=manifest_path,
+        confirmed_source_root=source_archive.parents[2],
+    )
+
+    assert promotion["status"] == "promoted"
+    assert promotion["source_size_bytes"] == source_size
+    assert source_archive.is_file()
+    assert (output_root / analysis.COMPACT_ARCHIVE_PROMOTION_FILENAME).is_file()
+
+    retirement = analysis.promote_compact_archive(
+        manifest_path=manifest_path,
+        confirmed_source_root=source_archive.parents[2],
+        delete_source=True,
+    )
+
+    assert retirement["status"] == "complete"
+    assert retirement["deleted_periods"] == 1
+    assert not source_archive.parents[2].exists()
+    status = analysis.analysis_status(manifest_path=manifest_path, verify_outputs=True)
+    assert status["complete"] is True
+    assert status["source_retired"] is True
+    assert analysis.run_analysis_task(manifest_path=manifest_path, index=0)["ok"] is True
+
+    compact = output_root / "compact/ICON-REA-L-CH1/2010/ptype_ICON-REA-L-CH1_201001.grib2"
+    changed = bytearray(compact.read_bytes())
+    changed[-1] ^= 1
+    compact.write_bytes(changed)
+    assert analysis.analysis_status(manifest_path=manifest_path, verify_outputs=True)["complete"] is False
+    with pytest.raises(RuntimeError, match="intentionally retired"):
+        analysis.run_analysis_task(manifest_path=manifest_path, index=0)
+
+
+def test_source_retirement_requires_exact_full_source_selection(tmp_path: Path) -> None:
+    manifest_path, source_archive, _ = _analysis_manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text())
+    source_manifest_path = Path(manifest["source_manifest_path"])
+    source_manifest = json.loads(source_manifest_path.read_text())
+    source_manifest["periods"].append(
+        {
+            "index": 1,
+            "period": "201002",
+            "dates": ["20100201"],
+            "message_count": 24,
+            "archive": "ICON-REA-L-CH1/2010/ptype_ICON-REA-L-CH1_201002.grib2",
+        }
+    )
+    _atomic_write_json(source_manifest, source_manifest_path)
+    manifest["source_manifest_sha256"] = hashlib.sha256(source_manifest_path.read_bytes()).hexdigest()
+    _atomic_write_json(manifest, manifest_path)
+    _atomic_write_json({"schema_version": 1}, source_archive.parents[2] / "ARCHIVE_CONTRACT.json")
+
+    with pytest.raises(RuntimeError, match="covers every source month"):
+        analysis.promote_compact_archive(
+            manifest_path=manifest_path,
+            confirmed_source_root=source_archive.parents[2],
+        )

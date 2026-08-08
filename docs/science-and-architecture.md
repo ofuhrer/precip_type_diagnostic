@@ -142,9 +142,9 @@ a separate GRIB bitmap contract.
 
 ## Archive quality control and analysis
 
-`analysis.py` accepts only a completed schema-v2 monthly REA manifest. It leaves
-that archive unchanged and gives every derived output a separate immutable
-contract. Monthly tasks validate the intended one-row-per-valid-hour grain,
+`analysis.py` accepts only a completed schema-v2 monthly REA manifest. Monthly
+tasks leave that archive unchanged and give every derived output a separate
+immutable contract. Monthly tasks validate the intended one-row-per-valid-hour grain,
 ordered cycle date/step metadata, validity time, fixed grid identity, zero
 missing values, finite integer categories, and the allowed code set. The task
 computes a canonical SHA-256 over decoded `uint8` values before repacking and
@@ -163,6 +163,16 @@ decoded checksums, and QC flags. `ptype_frequency.nc` retains the original cell
 ordering and includes longitude/latitude from the registered unstructured grid.
 The plot-ready freezing-rain product distinguishes code 3 from code 13 and also
 contains their combined unconditional and precipitation-conditional frequency.
+
+A completed full-range analysis may promote the compact GRIB tree and retire
+the original. Promotion is forbidden for subsets. It requires an exact source
+inventory, independently revalidates source and compact byte and decoded-value
+checksums, revalidates every analysis product, and seals per-month evidence in
+`COMPACT_ARCHIVE_PROMOTION.json` before any unlink. Source retirement unlinks
+only those exact sealed archives and the sealed source contract, then publishes
+`SOURCE_RETIREMENT.json`. Historical analysis receipts remain unchanged; status
+uses the retirement contract as the preserved source evidence and continues to
+fully decode and checksum the canonical compact archive on request.
 
 Cell areas are not encoded in the categorical source GRIB. High-impact events
 therefore report affected grid-cell counts, domain fractions, and cell-hours;
@@ -192,7 +202,8 @@ FDB discovery/checks -> HHL selection -> chunk retrieval -> array validation
   completeness.
 - `analysis.py` owns immutable post-backfill manifests, independent archive QC,
   exact four-bit repacking, hourly Parquet, gridded NetCDF aggregation, event
-  catalogues, reduction, receipts, and status.
+  catalogues, reduction, receipts, controlled full-range compact promotion,
+  exact-path source retirement, and retired-source-aware status.
 - `gribio.py` writes GRIB2 from the current `TOT_PREC` template, preserving grid
   and run metadata while replacing parameter metadata and values. It also
   iterates metadata from multi-message archives for publication verification.

@@ -136,7 +136,7 @@ current version to use the inode-safe layout.
 
 ## C. Compact archive and analysis products
 
-Keep the completed source archive immutable and use a separate output root:
+Keep the completed source archive immutable during analysis and use a separate output root:
 
 ```bash
 SOURCE_CAMPAIGN=/users/$USER/work/ptype-rea-2005-2025
@@ -162,7 +162,7 @@ and a reducer with an `afterok` dependency. Every task scans the source once,
 validates metadata, time, grid, missingness, and category codes, accumulates
 valid-time statistics, repacks each non-constant message to four bits, then independently
 rereads the compact archive and compares the decoded SHA-256 before atomic
-publication. The source archive is never modified.
+publication. Monthly analysis tasks never modify the source archive.
 
 GRIB simple packing canonically represents a spatially constant field with
 `bitsPerValue=0`, because no per-point coded values are needed. The exact
@@ -189,7 +189,9 @@ derived tree with 754 files. At concurrency eight, the 248 monthly tasks took
 ├── maps/freezing_rain_frequency.nc
 ├── DATA_QUALITY_REPORT.json
 ├── DATA_QUALITY_REPORT.md
-└── REDUCTION.json
+├── REDUCTION.json
+├── COMPACT_ARCHIVE_PROMOTION.json
+└── SOURCE_RETIREMENT.json
 ```
 
 `ptype_frequency.nc` contains monthly and seasonal climatologies, individual
@@ -210,6 +212,40 @@ Check progress cheaply or perform a deliberate full checksum/decoded scan:
 tools/run_balfrin.sh analysis-status "$ANALYSIS_CAMPAIGN/manifest.json"
 tools/run_balfrin.sh analysis-status "$ANALYSIS_CAMPAIGN/manifest.json" --verify-outputs
 ```
+
+After a full-range analysis—not a subset—has completed, the compact archive can
+replace the original. First seal the promotion without deleting anything:
+
+```bash
+tools/run_balfrin.sh analysis-retire-source "$ANALYSIS_CAMPAIGN/manifest.json" \
+  --confirm-source-root "$ARCHIVE_ROOT"
+```
+
+This independently decodes and hashes every source and compact month, verifies
+the monthly and reduced analysis products, requires the source tree to contain
+exactly the manifest-listed archives plus `ARCHIVE_CONTRACT.json`, and
+atomically publishes identical `COMPACT_ARCHIVE_PROMOTION.json` receipts under
+the campaign and analysis-output roots. Review that receipt, then permanently
+remove only those sealed files:
+
+```bash
+tools/run_balfrin.sh analysis-retire-source "$ANALYSIS_CAMPAIGN/manifest.json" \
+  --confirm-source-root "$ARCHIVE_ROOT" --delete-source
+```
+
+The command uses exact paths rather than recursive deletion, is resumable after
+a partial unlink, removes empty source directories, and publishes matching
+`SOURCE_RETIREMENT.json` receipts only after no source files remain. Thereafter
+`analysis-status`, including `--verify-outputs`, treats
+`<analysis-output>/compact` as canonical. A damaged compact month fails visibly
+and cannot be regenerated unless the original is restored from backup. The old
+`backfill-status` command remains a historical source-campaign check and is no
+longer expected to pass after intentional retirement.
+
+For the accepted full archive, retirement removes 408,677,898,462 bytes from
+the original source tree (408,677,897,928 GRIB bytes plus its contract). The
+analysis tree remains about 103.68 GB, so deleting the original frees about
+408.68 GB from the current duplicated layout.
 
 ### REA accumulation and date semantics
 

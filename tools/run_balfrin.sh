@@ -13,6 +13,7 @@ Usage:
   tools/run_balfrin.sh analysis-task MANIFEST INDEX
   tools/run_balfrin.sh analysis-reduce MANIFEST
   tools/run_balfrin.sh analysis-status MANIFEST [--verify-outputs]
+  tools/run_balfrin.sh analysis-retire-source MANIFEST --confirm-source-root PATH [--delete-source]
 
 Accepted production defaults:
   algorithm: Firdewsa
@@ -129,6 +130,12 @@ case "$MODE" in
     MANIFEST="$1"
     shift
     run_in_view rea-l-ch1 -m precip_type_diag.analysis status --manifest "$MANIFEST" "$@"
+    ;;
+  analysis-retire-source)
+    [[ $# -ge 1 ]] || { usage >&2; exit 2; }
+    MANIFEST="$1"
+    shift
+    run_in_view rea-l-ch1 -m precip_type_diag.analysis retire-source --manifest "$MANIFEST" "$@"
     ;;
   *)
     echo "unknown mode: $MODE" >&2

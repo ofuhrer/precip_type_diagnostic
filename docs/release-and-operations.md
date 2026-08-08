@@ -195,6 +195,28 @@ was 36 minutes 29 seconds, its reducer took 89 seconds, and its derived output
 was 103,676,920,634 bytes in 754 files. See the dated acceptance record for
 packing counts, product sizes, and physical-plausibility evidence.
 
+### Promoting compact GRIB and retiring the source
+
+Retirement is a separate, explicit step and is valid only when the analysis
+manifest exactly covers every month in the source manifest. Run
+`analysis-retire-source` without `--delete-source` first. It performs a complete
+source/compact decoded scan, validates both byte hashes, checks every monthly
+and reduced product receipt, rejects symlinks or unexpected source files, and
+publishes the immutable promotion contract in both evidence roots.
+
+After reviewing the sealed contract, repeat with `--delete-source`. The exact
+confirmed source root must match the manifest. The implementation unlinks only
+each contract-listed monthly file and `ARCHIVE_CONTRACT.json`; it does not use a
+glob or recursive deletion. If interrupted, rerunning validates the remaining
+files against the sealed evidence and continues. `SOURCE_RETIREMENT.json` is
+published only after the source tree contains no files and has been removed.
+
+After retirement, use `analysis-status`, not `backfill-status`, as the live
+archive check. Cheap status validates the retired-source and output receipt
+sizes; `--verify-outputs` hashes all analysis products and independently decodes
+the canonical compact GRIB. If a compact file is damaged, monthly processing
+refuses to recreate it without a restored source archive.
+
 ## Concurrency and publication safety
 
 One `.progressive.lock` serializes realtime orchestration and one `.cycle.lock`
