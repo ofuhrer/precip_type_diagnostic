@@ -20,10 +20,10 @@ cd "$REPO_ROOT"
 "$UENV_BIN" run --view=realtime "$FDB_IMAGE" -- bash -lc '
   set -euo pipefail
   python -m venv "$1"
-  "$1/bin/python" -m pip install "numba==0.66.0" "llvmlite==0.48.0"
+  "$1/bin/python" -m pip install "numba==0.66.0" "llvmlite==0.48.0" "pyarrow>=18,<24"
   "$1/bin/python" -m pip install --no-deps -e "$2"
   env PYTHONPATH="$3" "$1/bin/python" -m pip check
-  env PYTHONPATH="$3:$2/src" "$1/bin/python" -c "import eccodes; import earthkit.data; import netCDF4; import numba; import precip_type_diag; print(\"Balfrin runtime ready\")"
+  env PYTHONPATH="$3:$2/src" "$1/bin/python" -c "import eccodes; import earthkit.data; import netCDF4; import numba; import pyarrow; import precip_type_diag; print(\"Balfrin runtime ready\")"
 ' bash "$VENV_DIR" "$REPO_ROOT" "$FDB_SITE_PACKAGES"
 
 echo "Setup complete. Run: tools/run_balfrin.sh --help"

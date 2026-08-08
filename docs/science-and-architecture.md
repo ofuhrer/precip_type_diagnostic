@@ -133,7 +133,38 @@ reviewed performance/science contract, not a tuning parameter.
 | `13` | freezing rain on ground |
 
 The package includes an ecCodes overlay for MeteoSwiss `PTYPE`. Output writers
-validate shape, finite integer values, and the allowed code set.
+validate shape, finite integer values, and the allowed code set. New categorical
+GRIB output uses four-bit simple packing. Codes 0 through 13 are represented
+exactly; missingness remains a separate GRIB bitmap contract.
+
+## Archive quality control and analysis
+
+`analysis.py` accepts only a completed schema-v2 monthly REA manifest. It leaves
+that archive unchanged and gives every derived output a separate immutable
+contract. Monthly tasks validate the intended one-row-per-valid-hour grain,
+ordered cycle date/step metadata, validity time, fixed grid identity, zero
+missing values, finite integer categories, and the allowed code set. The task
+computes a canonical SHA-256 over decoded `uint8` values before repacking and
+again after independently rereading the four-bit result. Publication requires
+exact equality.
+
+Statistics are keyed by validity time, not cycle-month filename. In particular,
+cycle `D` step 24 contributes to `D+1 00 UTC`. Monthly task NetCDF files may
+therefore contain contributions to two valid months; the reducer combines
+adjacent contributions before building monthly/seasonal climatologies, annual
+counts, and the full-period product.
+
+`ptype_hourly_counts.parquet` has one UTC row per valid hour with domain counts
+for every code, precipitation and high-impact counts, source packing metadata,
+decoded checksums, and QC flags. `ptype_frequency.nc` retains the original cell
+ordering and includes longitude/latitude from the registered unstructured grid.
+The plot-ready freezing-rain product distinguishes code 3 from code 13 and also
+contains their combined unconditional and precipitation-conditional frequency.
+
+Cell areas are not encoded in the categorical source GRIB. High-impact events
+therefore report affected grid-cell counts, domain fractions, and cell-hours;
+they must not be labelled as square kilometres without a separately reviewed
+cell-area field.
 
 ## Production Flows
 
@@ -156,6 +187,9 @@ FDB discovery/checks -> HHL selection -> chunk retrieval -> array validation
   required-field sentinel presence. It deliberately does not enumerate every
   GRIB record; the daily core remains authoritative for exact step/level
   completeness.
+- `analysis.py` owns immutable post-backfill manifests, independent archive QC,
+  exact four-bit repacking, hourly Parquet, gridded NetCDF aggregation, event
+  catalogues, reduction, receipts, and status.
 - `gribio.py` writes GRIB2 from the current `TOT_PREC` template, preserving grid
   and run metadata while replacing parameter metadata and values. It also
   iterates metadata from multi-message archives for publication verification.

@@ -14,7 +14,7 @@ import numpy as np
 from earthkit.data import from_source
 from earthkit.data.encoders.grib import GribEncoder
 
-from .constants import PrecipitationTypeCode
+from .constants import PTYPE_BITS_PER_VALUE, PrecipitationTypeCode
 
 ALLOWED_OUTPUT_CODES = frozenset(int(code) for code in PrecipitationTypeCode)
 
@@ -226,6 +226,7 @@ def write_output_grib(
                 eccodes.codes_set(handle_id, "parameterCategory", 1)
                 eccodes.codes_set(handle_id, "parameterNumber", 19)
                 eccodes.codes_set(handle_id, "packingType", "grid_simple")
+                eccodes.codes_set(handle_id, "bitsPerValue", PTYPE_BITS_PER_VALUE)
                 eccodes.codes_set_values(handle_id, categorical.astype(float).reshape(-1))
                 with tempfile.NamedTemporaryFile(
                     mode="wb",
@@ -248,6 +249,7 @@ def write_output_grib(
                     "parameterCategory": 1,
                     "parameterNumber": 19,
                     "packingType": "grid_simple",
+                    "bitsPerValue": PTYPE_BITS_PER_VALUE,
                 },
             )
             with tempfile.NamedTemporaryFile(

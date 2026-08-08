@@ -15,6 +15,7 @@ DEPENDENCY_DISTRIBUTIONS = (
     "numba",
     "earthkit-data",
     "eccodes",
+    "pyarrow",
     "eccodes-cosmo-resources-python",
     "eccodes-cosmo-resources-python-internal",
 )

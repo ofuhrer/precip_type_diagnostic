@@ -10,10 +10,13 @@ The production contract is deliberately small:
 - REA-L-CH1 backfills process independent daily 00 UTC cycles, concatenate the
   24 validated records per day in chronological order, and atomically publish
   one categorical multi-message GRIB2 archive per month;
+- completed REA archives can be independently checked and losslessly repacked
+  to four-bit GRIB2 while producing compact Parquet and NetCDF analysis data;
 - `firdewsa` is the production default. The optional `icon` mode is an offline
   adaptation whose archived-input limitations are recorded in every summary.
 
-The tool is FDB-only. File input, plotting, station postprocessing, and bias
+The diagnostic is FDB-only. The archive-analysis path accepts only a completed
+schema-v2 REA campaign produced by this package. Station postprocessing and bias
 correction are out of scope.
 
 ## Balfrin: setup once
@@ -29,7 +32,7 @@ tools/run_balfrin.sh --help
 
 `setup_balfrin.sh` validates `/usr/bin/uenv`, uses the reviewed
 `fdb/5.21:v1` image, creates `.venv-fdb-5.21`, installs the pinned Numba
-runtime, installs this repository, and verifies imports. The run wrapper always
+runtime and PyArrow, installs this repository, and verifies imports. The run wrapper always
 selects the required FDB view and `PYTHONPATH`; no environment activation is
 needed.
 
@@ -131,6 +134,76 @@ only a complete validated monthly archive; otherwise it reruns that month.
 Schema-v1 daily manifests belong to release `v0.3.0`; re-plan them with the
 current version to use the inode-safe layout.
 
+## C. Compact archive and analysis products
+
+Keep the completed source archive immutable and use a separate output root:
+
+```bash
+SOURCE_CAMPAIGN=/users/$USER/work/ptype-rea-2005-2025
+ANALYSIS_CAMPAIGN=/users/$USER/work/ptype-rea-2005-2025-analysis
+ANALYSIS_OUTPUT=/store_new/mch/msopr/$USER/ptype-rea-2005-2025-analysis
+ANALYSIS_STAGING=$SCRATCH/ptype-rea-2005-2025-analysis
+
+tools/submit_analysis_campaign.sh \
+  --source-manifest "$SOURCE_CAMPAIGN/manifest.json" \
+  --manifest "$ANALYSIS_CAMPAIGN/manifest.json" \
+  --output-root "$ANALYSIS_OUTPUT" \
+  --staging-root "$ANALYSIS_STAGING"
+```
+
+For an acceptance run or a deliberate subset, add inclusive
+`--start-period YYYYMM --end-period YYYYMM`. Using the same value for both
+selects exactly one source month and resets the generated Slurm array to index
+zero; the full source manifest and its checksum remain pinned in the analysis
+manifest.
+
+The submission creates one resumable monthly `pp-long` task per source archive
+and a reducer with an `afterok` dependency. Every task scans the source once,
+validates metadata, time, grid, missingness, and category codes, accumulates
+valid-time statistics, repacks each message to four bits, then independently
+rereads the compact archive and compares the decoded SHA-256 before atomic
+publication. The source archive is never modified.
+
+The completed `20050101..20250831` source contains 181,152 hourly fields on
+1,147,980 grid points and occupies 408,677,897,928 bytes. Four-bit simple
+packing projects to about 104 GB; a representative source message shrank from
+2,296,159 to 574,189 bytes with exact decoded equality.
+
+```text
+<analysis-output>/
+├── ANALYSIS_CONTRACT.json
+├── grid.nc
+├── compact/ICON-REA-L-CH1/<YYYY>/ptype_ICON-REA-L-CH1_<YYYYMM>.grib2
+├── monthly/ptype_counts_<YYYYMM>.nc
+├── monthly/ptype_hourly_counts_<YYYYMM>.parquet
+├── ptype_hourly_counts.parquet
+├── ptype_frequency.nc
+├── high_impact_events.parquet
+├── maps/freezing_rain_frequency.nc
+├── DATA_QUALITY_REPORT.json
+├── DATA_QUALITY_REPORT.md
+└── REDUCTION.json
+```
+
+`ptype_frequency.nc` contains monthly and seasonal climatologies, individual
+annual fields, and full-period counts and frequencies for every category. All
+grouping uses GRIB validity time: cycle-day step 24 belongs to the following
+valid day and may belong to the following valid month. The freezing-rain map
+contains codes 3 and 13 separately and combined, both as an all-hour frequency
+and conditional on a precipitating hour.
+
+The high-impact catalogue defines an event as consecutive valid hours with code
+3 or 13 somewhere in the domain. The source GRIB supplies coordinates but no
+cell areas, so the catalogue reports affected grid-cell counts, cell-hours, and
+domain fractions rather than an unsupported square-kilometre estimate.
+
+Check progress cheaply or perform a deliberate full checksum/decoded scan:
+
+```bash
+tools/run_balfrin.sh analysis-status "$ANALYSIS_CAMPAIGN/manifest.json"
+tools/run_balfrin.sh analysis-status "$ANALYSIS_CAMPAIGN/manifest.json" --verify-outputs
+```
+
 ### REA accumulation and date semantics
 
 REA-L-CH1 accumulated and averaged fields restart at each daily `0000` cycle.
@@ -188,6 +261,15 @@ use the same rule.
 ├── manifest.json
 ├── manifest.sbatch
 ├── campaign-status.json
+├── receipts/<index>-<YYYYMM>.json
+├── locks/<index>-<YYYYMM>.lock
+└── logs/<job>_<index>.out
+
+<analysis-campaign-root>/
+├── manifest.json
+├── manifest.sbatch
+├── manifest.reduce.sbatch
+├── analysis-status.json
 ├── receipts/<index>-<YYYYMM>.json
 ├── locks/<index>-<YYYYMM>.lock
 └── logs/<job>_<index>.out

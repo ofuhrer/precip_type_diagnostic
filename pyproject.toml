@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "precip-type-diag"
-version = "0.4.1"
+version = "0.5.0"
 description = "Selectable original Firdewsa and ICON-adapted precipitation-type diagnostic."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,12 +16,14 @@ dependencies = [
   "earthkit-data>=1.0,<1.1",
   "eccodes>=2.47,<2.48",
   "netCDF4>=1.7,<1.8",
+  "pyarrow>=18,<24",
 ]
 
 [project.scripts]
 precip-type-diag = "precip_type_diag.__main__:main"
 precip-type-diag-realtime = "precip_type_diag.realtime:main"
 precip-type-diag-backfill = "precip_type_diag.backfill:main"
+precip-type-diag-analysis = "precip_type_diag.analysis:main"
 
 [project.optional-dependencies]
 test = [

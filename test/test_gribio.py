@@ -100,6 +100,7 @@ def test_output_grib_metadata_is_stable(tmp_path: Path) -> None:
     assert output_field.metadata("discipline") == 0
     assert output_field.metadata("parameterCategory") == 1
     assert output_field.metadata("parameterNumber") == 19
+    assert output_field.metadata("bitsPerValue") == 4
     assert output_field.metadata("date") == template_field.metadata("date")
     assert output_field.metadata("time") == template_field.metadata("time")
     assert output_field.metadata("step") == template_field.metadata("step")

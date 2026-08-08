@@ -158,6 +158,37 @@ and archive. Otherwise it reruns that month. The worst restart unit is one
 month; each constituent day still starts from step 0 and never differences step
 24 against another cycle.
 
+## REA archive-analysis scheduling
+
+Run analysis against a completed source campaign and a new output root. The
+source manifest SHA-256, source root, category contract, four-bit packing, and
+valid-time semantics are immutable in `ANALYSIS_CONTRACT.json`. The standard
+submission command creates a monthly `pp-long` array and submits the reducer
+with `afterok:<array-job-id>`.
+
+Each task owns one source month and publishes three outputs: compact GRIB,
+valid-month grid counts, and hourly domain counts. It stages the GRIB on the
+destination filesystem, independently rereads every compact message, compares
+the canonical decoded checksum, calls `fsync`, and atomically renames it. A
+complete receipt records source and compact byte checksums, decoded checksum,
+message count, grid identity, category totals, valid-month contribution hours,
+and compression ratio. Status reuses only size-consistent complete receipts;
+`--verify-outputs` additionally recomputes all checksums and decodes the compact
+GRIB stream.
+
+The reducer requires every monthly receipt, merges the hour-grain Parquet files
+in strictly contiguous valid-time order, combines month-boundary count
+contributions, and atomically publishes the final Parquet/NetCDF products and
+`REDUCTION.json`. Re-submit failed array indices; rerun the reducer after all
+tasks are complete. Never point analysis output or staging inside the source
+archive tree.
+
+Acceptance requires a real month with all expected messages, exact decoded
+source/compact equality, `bitsPerValue=4`, correct step-24 valid-month transfer,
+restart reuse, a successful reducer, readable Parquet/NetCDF products, and a
+passing data-quality report. Do not infer physical event area from cell count;
+the source PTYPE message has no cell-area field.
+
 ## Concurrency and publication safety
 
 One `.progressive.lock` serializes realtime orchestration and one `.cycle.lock`

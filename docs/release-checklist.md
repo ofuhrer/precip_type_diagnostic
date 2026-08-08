@@ -58,6 +58,7 @@ exact command, Slurm job ID/log, summary, monitoring file, and inspection.
 | REA middle era | Firdewsa | inventory/retrieval/output inspection | |
 | REA late era | Firdewsa | inventory/retrieval/output inspection | |
 | CH1/CH2/REA | ICON when required | archived microphysics and fidelity record | |
+| REA analysis | ICON archive | exact four-bit repack, valid-time counts, Parquet/NetCDF reduction, restart | |
 
 For each executed row require:
 
@@ -87,6 +88,21 @@ converted to the full current accumulator.
 - One monthly receipt, checksum, failed attempt, and restart reviewed:
 - `backfill-status --verify-outputs` result:
 - Storage, file-count estimate, filesystem quota, and retention owner:
+
+## Archive-analysis readiness
+
+- Completed immutable source manifest/root reviewed:
+- Separate staging and analysis output roots reviewed:
+- One-month source and four-bit decoded SHA-256 equality:
+- Four-bit size, packing keys, and category range inspected:
+- Step-24 following-month contribution verified:
+- Hourly Parquet grain and UTC continuity verified:
+- Monthly/seasonal/annual/full-period NetCDF counts verified:
+- Freezing-rain codes 3/13 map and conditional denominator verified:
+- Event definition and cell-area limitation reviewed:
+- Failed/partial monthly task and restart reviewed:
+- Reducer restart and `analysis-status --verify-outputs` result:
+- Full campaign storage, file count, partition, concurrency, and retention owner:
 
 ## Decision and rollback
 

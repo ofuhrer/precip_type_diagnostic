@@ -39,6 +39,8 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
 - `realtime.py`: progressive EPS discovery, cycle state, and incremental publish.
 - `backfill.py`: REA inventory manifests, monthly tasks, bounded daily staging,
   atomic archives, receipts, and status.
+- `analysis.py`: independent archive QC, exact four-bit repacking, Parquet and
+  NetCDF analysis products, event catalogues, reduction, receipts, and status.
 - `gribio.py`, `netcdfio.py`, `probabilities.py`: product formats and aggregation.
 - `monitoring.py`: operational status and exit contract.
 - `definitions/`: packaged ecCodes `PTYPE` overlay.
@@ -46,6 +48,8 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
 - `tools/run_balfrin.sh`: unified accepted operator entry point.
 - `tools/submit_backfill_campaign.sh`: resumable planner submission followed by
   automatic monthly-array submission only after a strict plan succeeds.
+- `tools/submit_analysis_campaign.sh`: completed-archive analysis planning,
+  monthly array submission, and dependent reduction.
 - `tools/run_depl_cycle.sh`: progressive explicit-cycle compatibility wrapper;
   it does not submit jobs.
 
@@ -89,6 +93,11 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
 - Preserve immutable `CONTRACT.json`, progressive `CYCLE.json`, locks, verified
   resume, per-increment evidence, `ARCHIVE_CONTRACT.json`, and monthly campaign
   receipt/status contracts.
+- Archive analysis must preserve the source tree, use a disjoint output root,
+  group by GRIB validity time, verify decoded source/compact equality, and
+  publish compact GRIB plus statistics atomically. Four-bit PTYPE packing is
+  exact; never change only packing metadata without repacking values. Do not
+  report physical area unless a reviewed cell-area field is supplied.
 - Fail visibly on deterministic science, shape, validation, and completeness
   errors. Retry only transient FDB list, retrieve, and decode failures.
 - Runs publish `RUNNING.json`, then atomically `DONE.json` or `FAILED.json`;

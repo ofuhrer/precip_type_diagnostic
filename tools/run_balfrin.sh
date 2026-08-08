@@ -9,6 +9,10 @@ Usage:
   tools/run_balfrin.sh backfill-plan [backfill plan options...]
   tools/run_balfrin.sh backfill-task MANIFEST INDEX [task options...]
   tools/run_balfrin.sh backfill-status MANIFEST [--verify-outputs]
+  tools/run_balfrin.sh analysis-plan [analysis plan options...]
+  tools/run_balfrin.sh analysis-task MANIFEST INDEX
+  tools/run_balfrin.sh analysis-reduce MANIFEST
+  tools/run_balfrin.sh analysis-status MANIFEST [--verify-outputs]
 
 Accepted production defaults:
   algorithm: Firdewsa
@@ -103,6 +107,28 @@ case "$MODE" in
     MANIFEST="$1"
     shift
     run_in_view rea-l-ch1 -m precip_type_diag.backfill status --manifest "$MANIFEST" "$@"
+    ;;
+  analysis-plan)
+    run_in_view rea-l-ch1 -m precip_type_diag.analysis plan "$@"
+    ;;
+  analysis-task)
+    [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+    MANIFEST="$1"
+    INDEX="$2"
+    shift 2
+    run_in_view rea-l-ch1 -m precip_type_diag.analysis run-task --manifest "$MANIFEST" --index "$INDEX" "$@"
+    ;;
+  analysis-reduce)
+    [[ $# -ge 1 ]] || { usage >&2; exit 2; }
+    MANIFEST="$1"
+    shift
+    run_in_view rea-l-ch1 -m precip_type_diag.analysis reduce --manifest "$MANIFEST" "$@"
+    ;;
+  analysis-status)
+    [[ $# -ge 1 ]] || { usage >&2; exit 2; }
+    MANIFEST="$1"
+    shift
+    run_in_view rea-l-ch1 -m precip_type_diag.analysis status --manifest "$MANIFEST" "$@"
     ;;
   *)
     echo "unknown mode: $MODE" >&2
