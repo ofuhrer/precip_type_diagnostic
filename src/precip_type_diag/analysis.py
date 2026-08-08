@@ -1086,10 +1086,42 @@ def promote_compact_archive(
         ):
             raise RuntimeError("existing compact archive promotion contract does not match this campaign")
 
+    archive_contract_path = source_root / REA_MODEL / "ARCHIVE_CONTRACT.json"
+    archive_contract: dict[str, object]
+    if archive_contract_path.is_file():
+        archive_contract = {
+            "relative_path": str(Path(REA_MODEL) / "ARCHIVE_CONTRACT.json"),
+            "size_bytes": archive_contract_path.stat().st_size,
+            "sha256": _sha256_file(archive_contract_path),
+            "mtime_ns": archive_contract_path.stat().st_mtime_ns,
+        }
+    elif promotion is not None and isinstance(promotion.get("source_archive_contract"), dict):
+        archive_contract = cast(dict[str, object], promotion["source_archive_contract"])
+    else:
+        raise RuntimeError(f"source archive contract is missing: {archive_contract_path}")
+    expected_source_files = {
+        (
+            source_root
+            / _safe_relative(period["source_archive"], label="source archive")
+        ).resolve()
+        for period in periods
+        if isinstance(period, dict)
+    }
+    if len(expected_source_files) != len(periods):
+        raise RuntimeError("analysis manifest contains invalid or duplicate source archive paths")
+    expected_source_files.add(archive_contract_path.resolve())
+    actual_source_files = _source_inventory(source_root)
+    if promotion is None and actual_source_files != expected_source_files:
+        unexpected = sorted(str(path) for path in actual_source_files - expected_source_files)
+        missing = sorted(str(path) for path in expected_source_files - actual_source_files)
+        raise RuntimeError(f"source archive inventory mismatch; unexpected={unexpected}, missing={missing}")
+    if promotion is not None and not actual_source_files.issubset(expected_source_files):
+        unexpected = sorted(str(path) for path in actual_source_files - expected_source_files)
+        raise RuntimeError(f"source archive contains unexpected files after promotion: {unexpected}")
+
     entries: list[dict[str, object]] = []
     source_bytes = 0
     compact_bytes = 0
-    expected_source_files: set[Path] = set()
     prior_entries = {
         str(entry["period"]): entry
         for entry in cast(list[dict[str, object]], promotion.get("periods", []) if promotion is not None else [])
@@ -1110,7 +1142,6 @@ def promote_compact_archive(
         compact_path = _output_path(manifest, period, "compact_archive")
         if compact_path.is_symlink():
             raise RuntimeError(f"compact archive must not be a symlink: {compact_path}")
-        expected_source_files.add(source_path.resolve())
         compact_check = _validate_compact_archive(compact_path, period)
         compact_evidence = receipt.get("compact_archive")
         expected_message_count = int(str(period["message_count"]))
@@ -1164,29 +1195,6 @@ def promote_compact_archive(
         entries.append(entry)
         source_bytes += int(str(source_evidence["size_bytes"]))
         compact_bytes += int(str(compact_evidence["size_bytes"]))
-
-    archive_contract_path = source_root / "ARCHIVE_CONTRACT.json"
-    archive_contract: dict[str, object]
-    if archive_contract_path.is_file():
-        archive_contract = {
-            "relative_path": "ARCHIVE_CONTRACT.json",
-            "size_bytes": archive_contract_path.stat().st_size,
-            "sha256": _sha256_file(archive_contract_path),
-            "mtime_ns": archive_contract_path.stat().st_mtime_ns,
-        }
-    elif promotion is not None and isinstance(promotion.get("source_archive_contract"), dict):
-        archive_contract = cast(dict[str, object], promotion["source_archive_contract"])
-    else:
-        raise RuntimeError(f"source archive contract is missing: {archive_contract_path}")
-    expected_source_files.add(archive_contract_path.resolve())
-    actual_source_files = _source_inventory(source_root)
-    if promotion is None and actual_source_files != expected_source_files:
-        unexpected = sorted(str(path) for path in actual_source_files - expected_source_files)
-        missing = sorted(str(path) for path in expected_source_files - actual_source_files)
-        raise RuntimeError(f"source archive inventory mismatch; unexpected={unexpected}, missing={missing}")
-    if promotion is not None and not actual_source_files.issubset(expected_source_files):
-        unexpected = sorted(str(path) for path in actual_source_files - expected_source_files)
-        raise RuntimeError(f"source archive contains unexpected files after promotion: {unexpected}")
 
     if promotion is None:
         promotion = {

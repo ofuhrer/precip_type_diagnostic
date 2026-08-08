@@ -291,7 +291,10 @@ def test_output_writer_uses_exact_four_bit_packing(tmp_path: Path) -> None:
 
 def test_compact_promotion_can_retire_source_and_preserve_verified_status(tmp_path: Path) -> None:
     manifest_path, source_archive, output_root = _analysis_manifest(tmp_path)
-    _atomic_write_json({"schema_version": 1, "archive": "synthetic"}, source_archive.parents[2] / "ARCHIVE_CONTRACT.json")
+    _atomic_write_json(
+        {"schema_version": 1, "archive": "synthetic"},
+        source_archive.parents[2] / analysis.REA_MODEL / "ARCHIVE_CONTRACT.json",
+    )
     analysis.run_analysis_task(manifest_path=manifest_path, index=0)
     analysis.reduce_analysis(manifest_path=manifest_path)
     source_size = source_archive.stat().st_size
@@ -346,7 +349,7 @@ def test_source_retirement_requires_exact_full_source_selection(tmp_path: Path) 
     _atomic_write_json(source_manifest, source_manifest_path)
     manifest["source_manifest_sha256"] = hashlib.sha256(source_manifest_path.read_bytes()).hexdigest()
     _atomic_write_json(manifest, manifest_path)
-    _atomic_write_json({"schema_version": 1}, source_archive.parents[2] / "ARCHIVE_CONTRACT.json")
+    _atomic_write_json({"schema_version": 1}, source_archive.parents[2] / analysis.REA_MODEL / "ARCHIVE_CONTRACT.json")
 
     with pytest.raises(RuntimeError, match="covers every source month"):
         analysis.promote_compact_archive(
