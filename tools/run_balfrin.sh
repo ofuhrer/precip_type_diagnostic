@@ -14,6 +14,11 @@ Usage:
   tools/run_balfrin.sh analysis-reduce MANIFEST
   tools/run_balfrin.sh analysis-status MANIFEST [--verify-outputs]
   tools/run_balfrin.sh analysis-retire-source MANIFEST --confirm-source-root PATH [--delete-source]
+  tools/run_balfrin.sh regional-mask [regional build-mask options...]
+  tools/run_balfrin.sh regional-plan [regional plan options...]
+  tools/run_balfrin.sh regional-task MANIFEST INDEX
+  tools/run_balfrin.sh regional-reduce MANIFEST
+  tools/run_balfrin.sh regional-status MANIFEST [--verify-outputs]
 
 Accepted production defaults:
   algorithm: Firdewsa
@@ -136,6 +141,31 @@ case "$MODE" in
     MANIFEST="$1"
     shift
     run_in_view rea-l-ch1 -m precip_type_diag.analysis retire-source --manifest "$MANIFEST" "$@"
+    ;;
+  regional-mask)
+    run_in_view rea-l-ch1 -m precip_type_diag.regional_analysis build-mask "$@"
+    ;;
+  regional-plan)
+    run_in_view rea-l-ch1 -m precip_type_diag.regional_analysis plan "$@"
+    ;;
+  regional-task)
+    [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+    MANIFEST="$1"
+    INDEX="$2"
+    shift 2
+    run_in_view rea-l-ch1 -m precip_type_diag.regional_analysis run-task --manifest "$MANIFEST" --index "$INDEX" "$@"
+    ;;
+  regional-reduce)
+    [[ $# -ge 1 ]] || { usage >&2; exit 2; }
+    MANIFEST="$1"
+    shift
+    run_in_view rea-l-ch1 -m precip_type_diag.regional_analysis reduce --manifest "$MANIFEST" "$@"
+    ;;
+  regional-status)
+    [[ $# -ge 1 ]] || { usage >&2; exit 2; }
+    MANIFEST="$1"
+    shift
+    run_in_view rea-l-ch1 -m precip_type_diag.regional_analysis status --manifest "$MANIFEST" "$@"
     ;;
   *)
     echo "unknown mode: $MODE" >&2

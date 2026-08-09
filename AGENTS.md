@@ -42,6 +42,9 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
 - `analysis.py`: independent archive QC, exact four-bit repacking, Parquet and
   NetCDF analysis products, event catalogues, reduction, receipts, controlled
   compact promotion, exact-path source retirement, and status.
+- `regional_analysis.py`: reviewed GeoJSON/grid masks, compact-archive regional
+  hourly counts, independent canonical evidence checks, generic icy-liquid
+  event catalogues, reduction, receipts, and status.
 - `gribio.py`, `netcdfio.py`, `probabilities.py`: product formats and aggregation.
 - `monitoring.py`: operational status and exit contract.
 - `definitions/`: packaged ecCodes `PTYPE` overlay.
@@ -51,6 +54,8 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
   automatic monthly-array submission only after a strict plan succeeds.
 - `tools/submit_analysis_campaign.sh`: completed-archive analysis planning,
   monthly array submission, and dependent reduction.
+- `tools/submit_regional_analysis_campaign.sh`: checksum-pinned regional
+  monthly array submission and dependent Parquet/event reduction.
 - `tools/run_depl_cycle.sh`: progressive explicit-cycle compatibility wrapper;
   it does not submit jobs.
 
@@ -105,6 +110,14 @@ belongs in `docs/release-checklist.md`; source and licensing notes are in
   manifest-listed archives plus the sealed archive contract, never a glob or
   recursive tree; publish retirement receipts only after the source is absent.
   The compact tree is then canonical and must remain fully status-verifiable.
+- Regional analysis must use a checksum-pinned mask derived from canonical
+  `grid.nc` and a reviewed GeoJSON boundary, use a disjoint output root, and
+  validate every compact message against sealed archive checksums and existing
+  domain-hour Parquet counts/checksums before publishing regional counts.
+  Preserve category partition equality and UTC continuity. Event catalogues for
+  codes 3/13, code 12, and codes 3/12/13 are permissive contiguous-hour
+  catalogues; severity screening uses stored cell counts or region fractions.
+  Do not report physical area without a reviewed cell-area field.
 - Fail visibly on deterministic science, shape, validation, and completeness
   errors. Retry only transient FDB list, retrieve, and decode failures.
 - Runs publish `RUNNING.json`, then atomically `DONE.json` or `FAILED.json`;

@@ -179,6 +179,21 @@ therefore report affected grid-cell counts, domain fractions, and cell-hours;
 they must not be labelled as square kilometres without a separately reviewed
 cell-area field.
 
+Regional hourly analysis is a separate immutable campaign over the canonical
+compact archive. A region mask is derived from `grid.nc` and an externally
+reviewed GeoJSON Polygon or MultiPolygon; the mask seals the boundary source,
+boundary and grid SHA-256 values, feature selector, point-in-polygon algorithm,
+grid UUID, and selected-cell count. Each compact GRIB message is independently
+validated and compared with the original full-domain hourly Parquet checksum
+and category counts before masked counts are accepted. This provides a regional
+time series without making GRIB the routine analysis format.
+
+The regional reducer defines three catalogue families from contiguous valid
+hours: codes 3/13 (freezing rain and freezing rain on ground), code 12
+(freezing drizzle), and codes 3/12/13 (combined icy liquid). Event extent is
+reported as selected grid-cell counts, selected-cell fractions, and cell-hours.
+Filtering by event maximum does not change the permissive catalogue definition.
+
 ## Production Flows
 
 ```text
@@ -204,6 +219,9 @@ FDB discovery/checks -> HHL selection -> chunk retrieval -> array validation
   exact four-bit repacking, hourly Parquet, gridded NetCDF aggregation, event
   catalogues, reduction, receipts, controlled full-range compact promotion,
   exact-path source retirement, and retired-source-aware status.
+- `regional_analysis.py` owns reviewed boundary-mask creation, a second
+  checksum-validated compact-archive pass, regional hourly Parquet, generic
+  icy-liquid event catalogues, regional QC, and resumable Slurm orchestration.
 - `gribio.py` writes GRIB2 from the current `TOT_PREC` template, preserving grid
   and run metadata while replacing parameter metadata and values. It also
   iterates metadata from multi-message archives for publication verification.
