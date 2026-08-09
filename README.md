@@ -12,6 +12,8 @@ The production contract is deliberately small:
   one categorical multi-message GRIB2 archive per month;
 - completed REA archives can be independently checked and losslessly repacked
   to four-bit GRIB2 while producing compact Parquet and NetCDF analysis data;
+- checksum-pinned regional masks can drive a second compact-archive pass that
+  produces regional hourly Parquet and icy-liquid event catalogues;
 - `firdewsa` is the production default. The optional `icon` mode is an offline
   adaptation whose archived-input limitations are recorded in every summary.
 
@@ -246,6 +248,75 @@ For the accepted full archive, retirement removes 408,677,898,462 bytes from
 the original source tree (408,677,897,928 GRIB bytes plus its contract). The
 analysis tree remains about 103.68 GB, so deleting the original frees about
 408.68 GB from the current duplicated layout.
+
+## D. Regional hourly analysis and event catalogues
+
+The canonical full-domain Parquet is intentionally small, but it cannot answer
+hour-by-hour regional questions. Build a checksum-pinned mask from a reviewed
+GeoJSON boundary and the canonical `grid.nc`, then run a second resumable
+monthly pass over the compact archive. This pass leaves the sealed analysis
+tree unchanged and writes to a separate output root.
+
+```bash
+ANALYSIS_MANIFEST=/users/$USER/work/ptype-rea-2005-2025-analysis/manifest.json
+ANALYSIS_OUTPUT=/store_new/mch/msopr/$USER/ptype-rea-2005-2025-analysis
+REGIONAL_CAMPAIGN=/users/$USER/work/ptype-rea-2005-2025-switzerland
+REGIONAL_OUTPUT=/store_new/mch/msopr/$USER/ptype-rea-2005-2025-switzerland
+BOUNDARY_URL=https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.1/geojson/ne_10m_admin_0_countries.geojson
+
+mkdir -p "$REGIONAL_CAMPAIGN"
+curl -fL "$BOUNDARY_URL" -o "$REGIONAL_CAMPAIGN/natural_earth_admin0_v5.1.1.geojson"
+
+tools/run_balfrin.sh regional-mask \
+  --grid "$ANALYSIS_OUTPUT/grid.nc" \
+  --geojson "$REGIONAL_CAMPAIGN/natural_earth_admin0_v5.1.1.geojson" \
+  --output "$REGIONAL_CAMPAIGN/switzerland_mask.nc" \
+  --region-name Switzerland \
+  --boundary-source "$BOUNDARY_URL" \
+  --feature-property ADM0_A3 --feature-value CHE
+
+tools/submit_regional_analysis_campaign.sh \
+  --analysis-manifest "$ANALYSIS_MANIFEST" \
+  --region-mask "$REGIONAL_CAMPAIGN/switzerland_mask.nc" \
+  --manifest "$REGIONAL_CAMPAIGN/manifest.json" \
+  --output-root "$REGIONAL_OUTPUT" \
+  --region-id switzerland
+```
+
+Use the actual property name in the reviewed GeoJSON. If the boundary file
+contains only the intended geometry, omit the two feature-selection options.
+The mask records the grid and boundary SHA-256, source description, selector,
+algorithm, and selected-cell count. An existing mask is immutable.
+
+Each monthly task checks GRIB metadata, allowed categories, exact four/zero-bit
+packing, the sealed compact byte and decoded checksums, and every existing
+full-domain hourly checksum and category count before it publishes a regional
+Parquet shard. The reducer requires continuous UTC hours and an exact category
+partition of every selected cell. It produces:
+
+```text
+<regional-output>/
+├── REGIONAL_ANALYSIS_CONTRACT.json
+├── monthly/ptype_hourly_counts_switzerland_<YYYYMM>.parquet
+├── ptype_hourly_counts_switzerland.parquet
+├── high_impact_events_switzerland.parquet
+├── freezing_drizzle_events_switzerland.parquet
+├── icy_liquid_events_switzerland.parquet
+├── REGIONAL_DATA_QUALITY_REPORT.json
+├── REGIONAL_DATA_QUALITY_REPORT.md
+└── REGIONAL_REDUCTION.json
+```
+
+Events are consecutive valid hours with at least one selected cell in codes
+`3/13`, code `12`, or codes `3/12/13`, respectively. Catalogues retain maximum
+affected-cell count, maximum region fraction, cell-hours, peak time, and the
+individual icy-liquid components. Filter these columns for severity screening;
+they are not physical areas because no reviewed cell-area dataset is supplied.
+
+```bash
+tools/run_balfrin.sh regional-status "$REGIONAL_CAMPAIGN/manifest.json"
+tools/run_balfrin.sh regional-status "$REGIONAL_CAMPAIGN/manifest.json" --verify-outputs
+```
 
 ### REA accumulation and date semantics
 

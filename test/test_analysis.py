@@ -10,7 +10,7 @@ import numpy as np
 import pyarrow.parquet as pq
 import pytest
 
-from precip_type_diag import analysis
+from precip_type_diag import analysis, regional_analysis
 from precip_type_diag.constants import PTYPE_BITS_PER_VALUE
 from precip_type_diag.gribio import bootstrap_eccodes_definitions
 from precip_type_diag.operational import _atomic_write_json
@@ -111,6 +111,8 @@ def _write_source_archive(path: Path, *, date: str = "20100131") -> None:
                     eccodes.codes_set(handle_id, key, value)
                 if step == 1:
                     values = np.array([3, 13, 0, 1], dtype=float)
+                elif step == 2:
+                    values = np.array([12, 0, 5, 1], dtype=float)
                 elif step == 6:
                     values = np.zeros(4, dtype=float)
                 else:
@@ -356,3 +358,72 @@ def test_source_retirement_requires_exact_full_source_selection(tmp_path: Path) 
             manifest_path=manifest_path,
             confirmed_source_root=source_archive.parents[2],
         )
+
+
+def test_regional_analysis_cross_checks_compact_archive_and_builds_event_catalogues(tmp_path: Path) -> None:
+    analysis_manifest_path, _, analysis_output = _analysis_manifest(tmp_path)
+    analysis.run_analysis_task(manifest_path=analysis_manifest_path, index=0)
+    analysis.reduce_analysis(manifest_path=analysis_manifest_path)
+    boundary_path = tmp_path / "switzerland.geojson"
+    boundary_path.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"iso_a3": "CHE"},
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [[[-0.1, -0.1], [0.5, -0.1], [0.5, 1.1], [-0.1, 1.1], [-0.1, -0.1]]],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    mask_path = tmp_path / "regional-campaign" / "switzerland_mask.nc"
+    mask = regional_analysis.build_region_mask(
+        grid_path=analysis_output / "grid.nc",
+        geojson_path=boundary_path,
+        output_path=mask_path,
+        region_name="Switzerland",
+        boundary_source="synthetic test boundary",
+        feature_property="iso_a3",
+        feature_value="CHE",
+    )
+    assert mask["selected_grid_point_count"] == 2
+
+    regional_manifest_path = tmp_path / "regional-campaign" / "manifest.json"
+    regional_output = tmp_path / "regional-products"
+    manifest = regional_analysis.build_regional_manifest(
+        analysis_manifest_path=analysis_manifest_path,
+        region_mask_path=mask_path,
+        manifest_path=regional_manifest_path,
+        output_root=regional_output,
+        region_id="switzerland",
+    )
+    assert manifest["selected_period_range"] == {"start": "201001", "end": "201001"}
+
+    receipt = regional_analysis.run_regional_task(manifest_path=regional_manifest_path, index=0)
+    assert receipt["ok"] is True
+    assert receipt["compact_archive"]["canonical_receipt_match"] is True
+    monthly = pq.read_table(regional_output / "monthly/ptype_hourly_counts_switzerland_201001.parquet")
+    assert monthly.num_rows == 24
+    assert monthly.column("region_grid_point_count").to_pylist() == [2] * 24
+    assert monthly.column("high_impact_grid_point_count")[0].as_py() == 1
+    assert monthly.column("freezing_drizzle_grid_point_count")[1].as_py() == 1
+
+    reduction = regional_analysis.reduce_regional_analysis(manifest_path=regional_manifest_path)
+    assert reduction["ok"] is True
+    high_impact = pq.read_table(regional_output / "high_impact_events_switzerland.parquet").to_pylist()
+    freezing_drizzle = pq.read_table(regional_output / "freezing_drizzle_events_switzerland.parquet").to_pylist()
+    icy_liquid = pq.read_table(regional_output / "icy_liquid_events_switzerland.parquet").to_pylist()
+    assert len(high_impact) == 1 and high_impact[0]["duration_hours"] == 1
+    assert len(freezing_drizzle) == 1 and freezing_drizzle[0]["duration_hours"] == 1
+    assert len(icy_liquid) == 1 and icy_liquid[0]["duration_hours"] == 2
+    report = json.loads((regional_output / "REGIONAL_DATA_QUALITY_REPORT.json").read_text())
+    assert report["status"] == "pass"
+    assert report["event_counts"] == {"freezing_drizzle": 1, "high_impact": 1, "icy_liquid": 1}
+    assert regional_analysis.regional_status(manifest_path=regional_manifest_path, verify_outputs=True)["complete"] is True

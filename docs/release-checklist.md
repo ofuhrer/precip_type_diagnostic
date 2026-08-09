@@ -59,6 +59,7 @@ exact command, Slurm job ID/log, summary, monitoring file, and inspection.
 | REA late era | Firdewsa | inventory/retrieval/output inspection | |
 | CH1/CH2/REA | ICON when required | archived microphysics and fidelity record | |
 | REA analysis | ICON archive | exact four-bit repack, valid-time counts, Parquet/NetCDF reduction, restart | |
+| REA regional analysis | compact ICON archive | reviewed mask, canonical checksum/count parity, regional Parquet/events, restart | |
 
 For each executed row require:
 
@@ -106,6 +107,17 @@ converted to the full current accumulator.
   exact source inventory, dual promotion receipts, exact-path deletion, dual
   retirement receipts, and post-retirement `analysis-status --verify-outputs`:
 - Full campaign storage, file count, partition, concurrency, and retention owner:
+
+## Regional-analysis readiness
+
+- Boundary source/version, GeoJSON SHA-256, and feature selector reviewed:
+- Mask grid SHA-256/UUID and selected-cell count reviewed:
+- One compact month matches sealed byte/decoded checksums and all domain-hour Parquet evidence:
+- Every regional hourly row partitions exactly across allowed categories:
+- UTC continuity across monthly boundaries verified:
+- Codes 3/13, code 12, and codes 3/12/13 catalogue definitions and event maxima verified:
+- Cell-count/fraction limitation and downstream severity filters reviewed:
+- Failed/partial task restart and `regional-status --verify-outputs` result:
 
 ## Decision and rollback
 

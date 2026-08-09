@@ -217,6 +217,30 @@ sizes; `--verify-outputs` hashes all analysis products and independently decodes
 the canonical compact GRIB. If a compact file is damaged, monthly processing
 refuses to recreate it without a restored source archive.
 
+### Regional compact-archive reduction
+
+Regional temporal work uses a separate campaign and output root, leaving the
+sealed compact archive and original reduction untouched. First create a mask
+from the canonical `grid.nc` and a reviewed GeoJSON boundary with
+`regional-mask`. The immutable mask must record a meaningful boundary source;
+review its SHA-256, selector, grid UUID, and selected-cell count before planning.
+
+`submit_regional_analysis_campaign.sh` creates one `pp-long` task per compact
+month and a dependent `pp-short` reducer. The default array allocation is 30
+minutes with concurrency eight. Each task decodes the compact GRIB once,
+validates exact four/zero-bit packing, matches the sealed byte and decoded
+checksums, and matches every full-domain hourly Parquet checksum and category
+count. It then atomically publishes one regional hourly Parquet shard and a
+receipt. No GRIB is copied or rewritten.
+
+The reducer merges the shards in continuous UTC order and publishes the
+regional hourly table plus freezing-rain (3/13), freezing-drizzle (12), and
+combined icy-liquid (3/12/13) event catalogues. A permissive event begins with
+the first affected hour and ends before the next zero-affected hour. Screen
+events afterward by `max_affected_grid_cells` or
+`max_affected_region_fraction_percent`; never relabel those measures as area.
+Use `regional-status --verify-outputs` for acceptance.
+
 ## Concurrency and publication safety
 
 One `.progressive.lock` serializes realtime orchestration and one `.cycle.lock`
@@ -229,6 +253,11 @@ must not overlap. A task writes a hidden partial file on the destination
 filesystem, validates it, calls `fsync`, and publishes with an atomic rename.
 Never have multiple tasks or shell commands append directly to the same monthly
 target, even though concatenated GRIB messages are a valid GRIB2 stream.
+
+Regional analysis likewise uses one campaign lock per month and adjacent-file
+atomic Parquet publication. Its output root must not overlap the canonical
+analysis tree, and its immutable manifest pins all canonical inputs and the
+region mask.
 
 `CONTRACT.json` is immutable. A different algorithm, output format, mask,
 vertical cutoff, or probability mode requires a different output root.
